@@ -167,6 +167,239 @@ def plot_draw_events(draw_outputs):
     fig.show()
 
 
+def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title, z_label, baseline_value=None):
+    if df.empty or df[z_column].isna().all():
+        print(f"No valid data for {z_column}")
+        return None
+
+    # Points for interpolation
+    points = df[['avg_x_value', 'avg_y_value']].values
+    values = df[z_column].values
+
+    # Perform interpolation
+    grid_z = griddata(points, values, (x_mesh, y_mesh), method='linear')
+
+    # Get min and max values for color scale normalization
+    z_min = np.nanmin(values)
+    z_max = np.nanmax(values)
+
+    # For tick values, clamp min to baseline value and max to data max
+    tick_min = baseline_value if baseline_value is not None else z_min
+    tick_max = z_max
+
+    # Round min/max for tick calculation
+    z_min_rounded = np.floor(z_min)
+    z_max_rounded = np.ceil(z_max)
+    tick_min_rounded = np.floor(tick_min)
+    tick_max_rounded = np.ceil(tick_max)
+    tick_min_rounded = tick_min
+    tick_max_rounded = tick_max
+
+    # Create 10 evenly spaced tick values clamped between baseline and max
+    tick_values = np.linspace(tick_min_rounded, tick_max_rounded, 10)
+    tick_values = np.round(tick_values, 1)  # Round to 1 decimal place
+
+    # Create figure
+    fig = go.Figure()
+
+    # Define whether higher values are better or worse based on metric
+    higher_is_better = z_column in ['total_heat_delivered_kWh', 'total_gal_hot_water_delivered', 'total_energy_used', 'first_draw_hot_water_delivered']
+
+    # Create two color scales - one vibrant, one desaturated
+    vibrant_colorscale = [
+        [0.0, 'rgb(68, 1, 84)'],       # Dark purple
+        [0.1, 'rgb(72, 40, 120)'],     # Purple
+        [0.2, 'rgb(62, 74, 137)'],     # Blue-purple
+        [0.3, 'rgb(49, 104, 142)'],    # Dark blue
+        [0.4, 'rgb(38, 130, 142)'],    # Teal
+        [0.5, 'rgb(31, 158, 137)'],    # Turquoise
+        [0.6, 'rgb(53, 183, 121)'],    # Green
+        [0.7, 'rgb(109, 205, 89)'],    # Light green
+        [0.8, 'rgb(180, 222, 44)'],    # Yellow-green
+        [0.9, 'rgb(223, 205, 35)'],    # Yellow
+        [1.0, 'rgb(253, 231, 37)']     # Bright yellow
+    ]
+
+    desaturated_colorscale = [
+        [0.0, 'rgb(220, 220, 220)'],  # Light gray
+        [0.2, 'rgb(200, 200, 200)'],  # Gray
+        [0.4, 'rgb(180, 180, 180)'],  # Gray
+        [0.6, 'rgb(160, 160, 160)'],  # Gray
+        [0.8, 'rgb(140, 140, 140)'],  # Gray
+        [1.0, 'rgb(120, 120, 120)']   # Dark gray
+    ]
+    
+
+
+    # If we have a baseline value, create a mask for the contour plot
+    if baseline_value is not None:
+        # Create mask for values that are better than baseline
+        mask_better = np.zeros_like(grid_z, dtype=bool)
+        
+        if higher_is_better:
+            mask_better = grid_z > baseline_value
+        else:
+            mask_better = grid_z < baseline_value
+
+        # Create two separate z arrays for better and worse than baseline
+        grid_z_better = np.copy(grid_z)
+        grid_z_worse = np.copy(grid_z)
+        
+        # Set values outside the mask to NaN
+        grid_z_better[~mask_better] = np.nan
+        grid_z_worse[mask_better] = np.nan
+        
+        # Add contour plot for values worse than baseline (desaturated)
+        contour_worse = go.Contour(
+            z=grid_z_worse,
+            x=x_grid,
+            y=y_grid,
+            colorscale=desaturated_colorscale,
+            colorbar=dict(
+                title=z_label,
+                ticks="outside",
+                tickfont=dict(size=12),
+                len=0.75,
+                tickvals=tick_values,
+                ticktext=[f"{val:.1f}" for val in tick_values]
+            ),
+            ncontours=20,
+            contours=dict(showlabels=True, labelfont=dict(size=12, color='white')),
+            line=dict(width=0.5, smoothing=0.85),
+            zmin=z_min_rounded,
+            zmax=z_max_rounded,
+            showscale=False  # Hide colorbar for this trace
+        )
+        fig.add_trace(contour_worse)
+        
+        # Add contour plot for values better than baseline (vibrant)
+        contour_better = go.Contour(
+            z=grid_z_better,
+            x=x_grid,
+            y=y_grid,
+            colorscale=vibrant_colorscale,
+            colorbar=dict(
+                title=z_label,
+                ticks="outside",
+                tickfont=dict(size=12),
+                len=0.75,
+                tickvals=tick_values,
+                ticktext=[f"{val:.1f}" for val in tick_values],
+                tickmode='array'  # Force specific tick positions
+            ),
+            ncontours=20,
+            contours=dict(showlabels=True, labelfont=dict(size=12, color='white')),
+            line=dict(width=0.5, smoothing=0.85),
+            zmin=tick_min_rounded,
+            zmax=tick_max_rounded,
+            zauto=False  # Disable automatic z-range calculation
+        )
+        fig.add_trace(contour_better)
+    else:
+        # Add regular contour plot if no baseline
+        contour = go.Contour(
+            z=grid_z,
+            x=x_grid,
+            y=y_grid,
+            colorscale=vibrant_colorscale,
+            colorbar=dict(
+                title=z_label,
+                ticks="outside",
+                tickfont=dict(size=12),
+                len=0.75,
+                tickvals=tick_values,
+                ticktext=[f"{val:.1f}" for val in tick_values]
+            ),
+            ncontours=20,
+            contours=dict(showlabels=True, labelfont=dict(size=12, color='white')),
+            line=dict(width=0.5, smoothing=0.85),
+            zmin=z_min_rounded,
+            zmax=z_max_rounded
+        )
+        fig.add_trace(contour)
+    
+    # Add scatter points for the data (excluding baseline)
+    for i, row in df.iterrows():
+        marker_props = {}
+        
+        # Color by whether it's better or worse than baseline
+        if baseline_value is not None:
+            is_better = (higher_is_better and row[z_column] > baseline_value) or \
+                        (not higher_is_better and row[z_column] < baseline_value)
+            
+            if is_better:
+                # Use color from vibrant scale for points better than baseline
+                # Use the same range as the colorbar (tick_min to tick_max)
+                norm_val = (row[z_column] - tick_min_rounded) / (tick_max_rounded - tick_min_rounded)
+                norm_val = max(0, min(1, norm_val))  # Clamp to [0, 1]
+                
+                # Find appropriate color from vibrant colorscale
+                color_idx = int(norm_val * (len(vibrant_colorscale) - 1))
+                color_idx = min(color_idx, len(vibrant_colorscale) - 1)
+                color = vibrant_colorscale[color_idx][1]
+            else:
+                # Use color from desaturated scale for points worse than baseline
+                norm_val = (row[z_column] - z_min_rounded) / (z_max_rounded - z_min_rounded)
+                norm_val = max(0, min(1, norm_val))  # Clamp to [0, 1]
+                
+                # Find appropriate color from desaturated colorscale
+                color_idx = int(norm_val * (len(desaturated_colorscale) - 1))
+                color_idx = min(color_idx, len(desaturated_colorscale) - 1)
+                color = desaturated_colorscale[color_idx][1]
+        else:
+            # Normal coloring if no baseline - use full data range
+            norm_val = (row[z_column] - z_min_rounded) / (z_max_rounded - z_min_rounded)
+            norm_val = max(0, min(1, norm_val))  # Clamp to [0, 1]
+            
+            # Find appropriate color from vibrant colorscale
+            color_idx = int(norm_val * (len(vibrant_colorscale) - 1))
+            color_idx = min(color_idx, len(vibrant_colorscale) - 1)
+            color = vibrant_colorscale[color_idx][1]
+        
+        marker_props = dict(
+            size=10,
+            color=color,
+            line=dict(width=1, color='black')
+        )
+        hover_text = f"File: {row['file']}<br>{z_label}: {row[z_column]:.2f}"
+        
+        # Add comparison to baseline if available
+        if baseline_value is not None:
+            diff = row[z_column] - baseline_value
+            diff_pct = (row[z_column] / baseline_value - 1) * 100
+            
+            if higher_is_better:
+                comparison = "better" if diff > 0 else "worse"
+            else:
+                comparison = "better" if diff < 0 else "worse"
+            
+            hover_text += f"<br>Compared to baseline: {diff:.2f} ({diff_pct:.1f}%), {comparison}"
+        
+        # Add the point
+        fig.add_trace(go.Scatter(
+            x=[row['avg_x_value']],
+            y=[row['avg_y_value']],
+            mode='markers',
+            marker=marker_props,
+            text=[hover_text],
+            hoverinfo='text',
+            showlegend=False
+        ))
+    
+    # Update layout
+    title_with_baseline = f"{title} (Baseline Hot Water Delivered: {baseline_value:.2f} gal)" if baseline_value is not None else title
+    fig.update_layout(
+        title=title_with_baseline,
+        xaxis_title="PCM Thickness (in)",
+        yaxis_title="Water - Tank film_h value (W/m²K)",
+        height=600,
+        width=800
+    )
+    
+    return fig
+    
+
+
 def plot_2d_comparison(dfs, draw_outputs, setpoint, pcm_temp, tank_type, tank_size):
     """
     Create scatter plots comparing average h_value (W/m^2K) and average sa_ratio 
@@ -280,236 +513,8 @@ def plot_2d_comparison(dfs, draw_outputs, setpoint, pcm_temp, tank_type, tank_si
     x_mesh, y_mesh = np.meshgrid(x_grid, y_grid)
 
     # Function to create interpolated plot with baseline reference
-    def create_interpolated_plot(df, z_column, title, z_label, baseline_value=None):
-        if df.empty or df[z_column].isna().all():
-            print(f"No valid data for {z_column}")
-            return None
-
-        # Points for interpolation
-        points = df[['avg_sa_ratio', 'avg_h_value']].values
-        values = df[z_column].values
-
-        # Perform interpolation
-        grid_z = griddata(points, values, (x_mesh, y_mesh), method='linear')
-
-        # Get min and max values for color scale normalization
-        z_min = np.nanmin(values)
-        z_max = np.nanmax(values)
-
-        # For tick values, clamp min to baseline value and max to data max
-        tick_min = baseline_value if baseline_value is not None else z_min
-        tick_max = z_max
-
-        # Round min/max for tick calculation
-        z_min_rounded = np.floor(z_min)
-        z_max_rounded = np.ceil(z_max)
-        tick_min_rounded = np.floor(tick_min)
-        tick_max_rounded = np.ceil(tick_max)
-        tick_min_rounded = tick_min
-        tick_max_rounded = tick_max
-
-        # Create 10 evenly spaced tick values clamped between baseline and max
-        tick_values = np.linspace(tick_min_rounded, tick_max_rounded, 10)
-        tick_values = np.round(tick_values, 1)  # Round to 1 decimal place
-
-        # Create figure
-        fig = go.Figure()
-
-        # Define whether higher values are better or worse based on metric
-        higher_is_better = z_column in ['total_heat_delivered_kWh', 'total_gal_hot_water_delivered', 'total_energy_used']
-
-        # Create two color scales - one vibrant, one desaturated
-        vibrant_colorscale = [
-            [0.0, 'rgb(68, 1, 84)'],       # Dark purple
-            [0.1, 'rgb(72, 40, 120)'],     # Purple
-            [0.2, 'rgb(62, 74, 137)'],     # Blue-purple
-            [0.3, 'rgb(49, 104, 142)'],    # Dark blue
-            [0.4, 'rgb(38, 130, 142)'],    # Teal
-            [0.5, 'rgb(31, 158, 137)'],    # Turquoise
-            [0.6, 'rgb(53, 183, 121)'],    # Green
-            [0.7, 'rgb(109, 205, 89)'],    # Light green
-            [0.8, 'rgb(180, 222, 44)'],    # Yellow-green
-            [0.9, 'rgb(223, 205, 35)'],    # Yellow
-            [1.0, 'rgb(253, 231, 37)']     # Bright yellow
-        ]
-
-        desaturated_colorscale = [
-            [0.0, 'rgb(220, 220, 220)'],  # Light gray
-            [0.2, 'rgb(200, 200, 200)'],  # Gray
-            [0.4, 'rgb(180, 180, 180)'],  # Gray
-            [0.6, 'rgb(160, 160, 160)'],  # Gray
-            [0.8, 'rgb(140, 140, 140)'],  # Gray
-            [1.0, 'rgb(120, 120, 120)']   # Dark gray
-        ]
-        
-
-
-        # If we have a baseline value, create a mask for the contour plot
-        if baseline_value is not None:
-            # Create mask for values that are better than baseline
-            mask_better = np.zeros_like(grid_z, dtype=bool)
-            
-            if higher_is_better:
-                mask_better = grid_z > baseline_value
-            else:
-                mask_better = grid_z < baseline_value
-
-            # Create two separate z arrays for better and worse than baseline
-            grid_z_better = np.copy(grid_z)
-            grid_z_worse = np.copy(grid_z)
-            
-            # Set values outside the mask to NaN
-            grid_z_better[~mask_better] = np.nan
-            grid_z_worse[mask_better] = np.nan
-            
-            # Add contour plot for values worse than baseline (desaturated)
-            contour_worse = go.Contour(
-                z=grid_z_worse,
-                x=x_grid,
-                y=y_grid,
-                colorscale=desaturated_colorscale,
-                colorbar=dict(
-                    title=z_label,
-                    ticks="outside",
-                    tickfont=dict(size=12),
-                    len=0.75,
-                    tickvals=tick_values,
-                    ticktext=[f"{val:.1f}" for val in tick_values]
-                ),
-                ncontours=20,
-                contours=dict(showlabels=True, labelfont=dict(size=12, color='white')),
-                line=dict(width=0.5, smoothing=0.85),
-                zmin=z_min_rounded,
-                zmax=z_max_rounded,
-                showscale=False  # Hide colorbar for this trace
-            )
-            fig.add_trace(contour_worse)
-            
-            # Add contour plot for values better than baseline (vibrant)
-            contour_better = go.Contour(
-                z=grid_z_better,
-                x=x_grid,
-                y=y_grid,
-                colorscale=vibrant_colorscale,
-                colorbar=dict(
-                    title=z_label,
-                    ticks="outside",
-                    tickfont=dict(size=12),
-                    len=0.75,
-                    tickvals=tick_values,
-                    ticktext=[f"{val:.1f}" for val in tick_values],
-                    tickmode='array'  # Force specific tick positions
-                ),
-                ncontours=20,
-                contours=dict(showlabels=True, labelfont=dict(size=12, color='white')),
-                line=dict(width=0.5, smoothing=0.85),
-                zmin=tick_min_rounded,
-                zmax=tick_max_rounded,
-                zauto=False  # Disable automatic z-range calculation
-            )
-            fig.add_trace(contour_better)
-        else:
-            # Add regular contour plot if no baseline
-            contour = go.Contour(
-                z=grid_z,
-                x=x_grid,
-                y=y_grid,
-                colorscale=vibrant_colorscale,
-                colorbar=dict(
-                    title=z_label,
-                    ticks="outside",
-                    tickfont=dict(size=12),
-                    len=0.75,
-                    tickvals=tick_values,
-                    ticktext=[f"{val:.1f}" for val in tick_values]
-                ),
-                ncontours=20,
-                contours=dict(showlabels=True, labelfont=dict(size=12, color='white')),
-                line=dict(width=0.5, smoothing=0.85),
-                zmin=z_min_rounded,
-                zmax=z_max_rounded
-            )
-            fig.add_trace(contour)
-        
-        # Add scatter points for the data (excluding baseline)
-        for i, row in df.iterrows():
-            marker_props = {}
-            
-            # Color by whether it's better or worse than baseline
-            if baseline_value is not None:
-                is_better = (higher_is_better and row[z_column] > baseline_value) or \
-                            (not higher_is_better and row[z_column] < baseline_value)
-                
-                if is_better:
-                    # Use color from vibrant scale for points better than baseline
-                    # Use the same range as the colorbar (tick_min to tick_max)
-                    norm_val = (row[z_column] - tick_min_rounded) / (tick_max_rounded - tick_min_rounded)
-                    norm_val = max(0, min(1, norm_val))  # Clamp to [0, 1]
-                    
-                    # Find appropriate color from vibrant colorscale
-                    color_idx = int(norm_val * (len(vibrant_colorscale) - 1))
-                    color_idx = min(color_idx, len(vibrant_colorscale) - 1)
-                    color = vibrant_colorscale[color_idx][1]
-                else:
-                    # Use color from desaturated scale for points worse than baseline
-                    norm_val = (row[z_column] - z_min_rounded) / (z_max_rounded - z_min_rounded)
-                    norm_val = max(0, min(1, norm_val))  # Clamp to [0, 1]
-                    
-                    # Find appropriate color from desaturated colorscale
-                    color_idx = int(norm_val * (len(desaturated_colorscale) - 1))
-                    color_idx = min(color_idx, len(desaturated_colorscale) - 1)
-                    color = desaturated_colorscale[color_idx][1]
-            else:
-                # Normal coloring if no baseline - use full data range
-                norm_val = (row[z_column] - z_min_rounded) / (z_max_rounded - z_min_rounded)
-                norm_val = max(0, min(1, norm_val))  # Clamp to [0, 1]
-                
-                # Find appropriate color from vibrant colorscale
-                color_idx = int(norm_val * (len(vibrant_colorscale) - 1))
-                color_idx = min(color_idx, len(vibrant_colorscale) - 1)
-                color = vibrant_colorscale[color_idx][1]
-            
-            marker_props = dict(
-                size=10,
-                color=color,
-                line=dict(width=1, color='black')
-            )
-            hover_text = f"File: {row['file']}<br>{z_label}: {row[z_column]:.2f}"
-            
-            # Add comparison to baseline if available
-            if baseline_value is not None:
-                diff = row[z_column] - baseline_value
-                diff_pct = (row[z_column] / baseline_value - 1) * 100
-                
-                if higher_is_better:
-                    comparison = "better" if diff > 0 else "worse"
-                else:
-                    comparison = "better" if diff < 0 else "worse"
-                
-                hover_text += f"<br>Compared to baseline: {diff:.2f} ({diff_pct:.1f}%), {comparison}"
-            
-            # Add the point
-            fig.add_trace(go.Scatter(
-                x=[row['avg_sa_ratio']],
-                y=[row['avg_h_value']],
-                mode='markers',
-                marker=marker_props,
-                text=[hover_text],
-                hoverinfo='text',
-                showlegend=False
-            ))
-        
-        # Update layout
-        title_with_baseline = f"{title} (Baseline Hot Water Delivered: {baseline_value:.2f} gal)" if baseline_value is not None else title
-        fig.update_layout(
-            title=title_with_baseline,
-            xaxis_title="SA Ratio",
-            yaxis_title="h value (W/m²K)",
-            height=600,
-            width=800
-        )
-        
-        return fig
+    
+    
     # Create plots with baseline references (all three plots as in original)
     # fig_delivered = create_interpolated_plot(
     #     df_plot_clean.dropna(subset=['total_heat_delivered_kWh']),
@@ -529,7 +534,7 @@ def plot_2d_comparison(dfs, draw_outputs, setpoint, pcm_temp, tank_type, tank_si
     
     fig_total_water = create_interpolated_plot(
         df_plot_clean.dropna(subset=['total_gal_hot_water_delivered']),
-        'total_gal_hot_water_delivered',
+        'total_gal_hot_water_delivered', x_mesh, y_mesh, x_grid, y_grid,
         f"h vs SA_ratio Design Matrix with Cut off Temp 110°F for {tank_type} Water Heater<br>Setpoint: {setpoint}°F PCM Melt Temp: {pcm_temp}°F <br>Tank Size: {tank_size} gal",
         "Total Hot Water (>110°F)<br>Delivered (gal)",
         baseline_value
@@ -552,6 +557,156 @@ def plot_2d_comparison(dfs, draw_outputs, setpoint, pcm_temp, tank_type, tank_si
             "water": fig_total_water
         }
     }
+    
+    
+def plot_2d_comparison_generic(dfs, draw_outputs, x_column_pattern, y_column_pattern, setpoint=None, pcm_temp=None, tank_type=None, tank_size=None):
+
+    data = []
+    baseline_file = None
+    baseline_value = None
+    
+
+    for file, df in dfs.items():
+        # Check if this is a baseline file (without PCM in column names)
+        has_pcm = any('PCM' in col for col in df.columns)
+        is_baseline = not has_pcm
+        
+        # Extract values from columns matching the x and y patterns
+        x_values = []
+        y_values = []
+        
+        # For baseline, look for columns without PCM
+        if is_baseline:
+            baseline_file = file
+            # Extract values from non-PCM columns
+            for col in df.columns:
+                # Check for x-axis parameter
+                if x_column_pattern in col and "Water Tank" in col and "PCM" not in col:
+                    x_values.append(df[col].mean())
+                
+                # Check for y-axis parameter
+                if y_column_pattern in col and "Water Tank" in col and "PCM" not in col:
+                    y_values.append(df[col].mean())
+        else:
+            # Normal PCM extraction
+            for col in df.columns:
+                # Check for x-axis parameter with PCM pattern
+                pcm_match = re.search(r"Water Tank PCM(\d+)", col)
+                if pcm_match and x_column_pattern in col:
+                    x_values.append(df[col].mean())
+                
+                # Check for y-axis parameter with PCM pattern
+                if pcm_match and y_column_pattern in col:
+                    y_values.append(df[col].mean())
+        
+        # Compute average values if we found at least one value from each group
+        if x_values and y_values:
+            avg_x = sum(x_values) / len(x_values)
+            avg_y = sum(y_values) / len(y_values)
+        else:
+            avg_x = 0
+            avg_y = 0
+
+        # Get energy metrics from draw_outputs
+        total_gal_hot_water_delivered = draw_outputs[file].get('total_water_volume_gal', None)
+        total_delivered = draw_outputs[file].get('total_heat_delivered_kWh', None)
+        total_used = draw_outputs[file].get('total_energy_used_kwh', None)
+        first_draw_hot_water_delivered = draw_outputs[file].get('draw_events', [])[0].get('water_volume_gal', None)
+        average_pcm_temp = draw_outputs[file].get('average_pcm_temp', None)
+        
+        
+        data.append({
+            'file': file,
+            'avg_x_value': avg_x,
+            'avg_y_value': avg_y,
+            'total_gal_hot_water_delivered': total_gal_hot_water_delivered,
+            'total_heat_delivered_kWh': total_delivered,
+            'total_energy_used': total_used,
+            'is_baseline': is_baseline,
+            'first_draw_hot_water_delivered': first_draw_hot_water_delivered,
+            "average_pcm_temp": average_pcm_temp
+        })
+
+    # Create a DataFrame from the collected data
+    df_plot = pd.DataFrame(data)
+
+    # Drop any rows with missing values for plotting
+    df_plot_clean = df_plot.dropna(subset=['avg_x_value', 'avg_y_value'])
+    
+    # Get baseline value and then filter out baseline from plotting data
+    if baseline_file:
+        baseline_row = df_plot_clean[df_plot_clean['is_baseline'] == True]
+        if not baseline_row.empty:
+            baseline_value = baseline_row['total_gal_hot_water_delivered'].values[0]
+    
+    # Filter out baseline case from plotting data
+    df_plot_clean = df_plot_clean[df_plot_clean['is_baseline'] == False]
+    
+    if df_plot_clean.empty:
+        print("No non-baseline data available for plotting")
+        return None
+
+    # Create interpolation grid
+    grid_resolution = 100
+    x_min, x_max = df_plot_clean['avg_x_value'].min(), df_plot_clean['avg_x_value'].max()
+    y_min, y_max = df_plot_clean['avg_y_value'].min(), df_plot_clean['avg_y_value'].max()
+
+    # Add a small buffer to avoid edge issues
+    x_buffer = (x_max - x_min) * 0.05
+    y_buffer = (y_max - y_min) * 0.05
+
+    x_grid = np.linspace(x_min - x_buffer, x_max + x_buffer, grid_resolution)
+    y_grid = np.linspace(y_min - y_buffer, y_max + y_buffer, grid_resolution)
+    x_mesh, y_mesh = np.meshgrid(x_grid, y_grid)
+
+    # Create the plot title with dynamic parameter names
+    plot_title = f"{y_column_pattern} vs {x_column_pattern} Design Matrix with Cut off Temp 110°F for {tank_type} Water Heater<br>Setpoint: {setpoint}°F PCM Melt Temp: {pcm_temp}°F <br>Tank Size: {tank_size} gal"
+    
+    fig_total_water = create_interpolated_plot(
+        df_plot_clean.dropna(subset=['total_gal_hot_water_delivered']),
+        'total_gal_hot_water_delivered', x_mesh, y_mesh, x_grid, y_grid,
+        plot_title,
+        "Total Hot Water (>110°F)<br>Delivered (gal)",
+        baseline_value
+    )
+    
+    fig_firstdraw_water = create_interpolated_plot(
+        df_plot_clean.dropna(subset=['first_draw_hot_water_delivered']),
+        'first_draw_hot_water_delivered', x_mesh, y_mesh, x_grid, y_grid,
+        plot_title,
+        "First Draw Hot Water (>110°F)<br>Delivered (gal)",
+        baseline_value
+    )
+
+    try:
+        avg_pcm_temp_plot = create_interpolated_plot(
+            df_plot_clean.dropna(subset=['average_pcm_temp']),
+            'average_pcm_temp', x_mesh, y_mesh, x_grid, y_grid,
+            plot_title,
+            "Average PCM Temperature (°F)",
+            baseline_value
+        )
+        avg_pcm_temp_plot.show()
+    except Exception as e:
+        print(f"Error creating avg_pcm_temp_plot: {e}")
+    # Show the plot
+    if fig_total_water:
+        fig_total_water.show()
+        
+    if fig_firstdraw_water:
+        fig_firstdraw_water.show()
+        
+    # if avg_pcm_temp_plot:
+    #     avg_pcm_temp_plot.show() 
+    
+    return {
+        "baseline_value": baseline_value,
+        "baseline_file": baseline_file,
+        "figures": {
+            "water": fig_total_water
+        }
+    }
+
     
 def calculate_hot_water_delivered(dfs, first_hour_test=False):
     """
@@ -586,23 +741,40 @@ def calculate_hot_water_delivered(dfs, first_hour_test=False):
         
         draw_events = []
         current_event = None
+        is_pcm = True
         
         # compute time deltas (in seconds)
-        if not pd.api.types.is_numeric_dtype(df_copy.index):
-            if pd.api.types.is_datetime64_any_dtype(df_copy.index):
-                df_copy['time_delta'] = df_copy.index.to_series().diff().dt.total_seconds()
-            else:
-                df_copy['time_delta'] = pd.to_numeric(df_copy.index.to_series().diff(), errors='coerce')
-        else:
-            df_copy['time_delta'] = df_copy.index.to_series().diff()
-        df_copy['time_delta'] = df_copy['time_delta'].fillna(0)
+        df_copy.index = pd.to_datetime(df_copy['Time'])
+        df_copy['time_delta'] = (
+                                pd.to_datetime(df_copy.index).to_series()
+                                .diff()
+                                .dt.total_seconds()
+                                .fillna(0)
+                                )
         
+        pcm_columns = [col for col in df_copy.columns if col.startswith('T_PCM')]
+        if len(pcm_columns) > 0:
+            is_pcm = True
+            pcm_enthalpy_column = 'Total PCM Enthalpy (J)'
+            starting_pcm_enthalpy = df_copy[pcm_enthalpy_column].iloc[0]
+            
+            # find the first instance of pcm temp lower than cutoff_temp
+            df_copy['average_pcm_temp'] = df_copy[pcm_columns].mean(axis=1)
+            df_copy['is_cutoff_temp'] = df_copy['average_pcm_temp'] < water_temp_cutoff
+            cutoff_index = df_copy[df_copy['is_cutoff_temp']].index[0]
+            
+            baseline_enthalpy = df_copy[pcm_enthalpy_column].iloc[cutoff_index]
+            
+        
+    
         # --- iterate rows ---
         for timestamp, row in df_copy.iterrows():
             flow = row[water_draw_col]
             temp = row[water_outlet_temp]
             heat_W = row[water_output_W_col]
             dt = row['time_delta']
+            avg_end_pcm_temp = row['average_pcm_temp']
+            enthalpy = row['Total PCM Enthalpy (J)']
             
             if flow > 0:
                 if not is_draw_active:
@@ -628,9 +800,9 @@ def calculate_hot_water_delivered(dfs, first_hour_test=False):
                 
                 # only count “hot” volume & energy
                 if temp >= water_temp_cutoff:
-                    # note: W * s → J, and (L/min)*(s)→L  with a 120s scaling per original
-                    water_L = 3 / L_TO_GAL_RATIO / 120
-                    energy_J = heat_W / 120
+                    # note: W * s → J, and (L/min)*(s)→L
+                    water_L = 3 / L_TO_GAL_RATIO / (60/dt)
+                    energy_J = heat_W / (60/dt)
                     total_water_volume_L += water_L
                     total_heat_delivered_J += energy_J
                     current_event['water_volume_L']  += water_L
@@ -646,6 +818,10 @@ def calculate_hot_water_delivered(dfs, first_hour_test=False):
                         current_event['avg_temp'] = (
                             sum(current_event['temp_readings']) / len(current_event['temp_readings'])
                         )
+                    if is_pcm:
+                        current_event['pcm_enthalpy'] = enthalpy
+                        current_event['avg_pcm_temp'] = avg_end_pcm_temp
+                        current_event['pcm_soc'] = (enthalpy - baseline_enthalpy) / (baseline_enthalpy)
                     draw_events.append(current_event)
                 is_draw_active = False
                 current_event = None
@@ -658,6 +834,10 @@ def calculate_hot_water_delivered(dfs, first_hour_test=False):
                 current_event['avg_temp'] = (
                     sum(current_event['temp_readings']) / len(current_event['temp_readings'])
                 )
+                if is_pcm: 
+                    current_event['pcm_enthalpy'] = enthalpy
+                    current_event['avg_pcm_temp'] = avg_end_pcm_temp
+                    current_event['pcm_soc'] = (enthalpy - baseline_enthalpy) / (baseline_enthalpy)
             draw_events.append(current_event)
         
         # aggregate totals
@@ -685,8 +865,25 @@ def calculate_hot_water_delivered(dfs, first_hour_test=False):
                                 (final['water_volume_gal'] * adj)
                 total_water_volume_gal = adjusted_gal
                 total_water_volume_L   = total_water_volume_gal / L_TO_GAL_RATIO
+                
+                
+        # grab the temperature of each pcm layer at the end of the list
+        try:
+            pcm_temps = [df[col].iloc[-1] for col in pcm_columns]
+            if len(pcm_temps) > 0:
+                average_pcm_end_temp = sum(pcm_temps) / len(pcm_temps)
+                pcm_soc = (df_copy[pcm_enthalpy_column].iloc[-1] - baseline_enthalpy) / (baseline_enthalpy)
+            else:
+                average_pcm_end_temp = 14.44
+                pcm_soc = 0
+        except Exception as e:
+            print(f"Error calculating average PCM temperature for file [{file_key}]: {e}")
+            average_pcm_end_temp = 14.44
+
         
         output[file_key] = {
+            "average_pcm_end_temp": average_pcm_end_temp,
+            "pcm_soc": pcm_soc,
             'total_water_volume_L': total_water_volume_L,
             'total_water_volume_gal': total_water_volume_gal,
             'total_energy_used_kwh': total_energy_used_kwh,
@@ -1722,7 +1919,7 @@ RED = "\033[91m"
 
 # Compile these once at module load
 SETPOINT_REGEX = re.compile(r"(\d+(?:\.\d+)?)F$")
-PCM_SHIFT_REGEX = re.compile(r"cp_h-T_data_shifted_(\d+(?:\.\d+)?)F", re.IGNORECASE)
+PCM_SHIFT_REGEX = re.compile(r"90-cp_h-T_data_shifted_(\d+(?:\.\d+)?)F", re.IGNORECASE)
 TYPE_REGEX = re.compile(r"(Electric|Heat[Pp]ump)")
 SIZE_REGEX = re.compile(r"(\d+)gal")
 
@@ -1777,7 +1974,7 @@ def process_single_folder(output_folder, folder):
     outputs = calculate_hot_water_delivered(dfs, first_hour_test=False)
     # plot_draw_event_summary(output)
     # plot_draw_events(output)
-    plot_2d_comparison(dfs, outputs, setpoint, pcm_temp, tank_type, tank_size)
+    plot_2d_comparison_generic(dfs, outputs, "PCM Thickness", "film_h", setpoint, pcm_temp, tank_type, tank_size)
     
     print(f"✅ Finished processing setpoint={setpoint}F with pcm_temp={pcm_temp}F for tank type {tank_type} at {tank_size}gal in {output_folder}")
     
@@ -1799,20 +1996,27 @@ def get_output_folders(root_dir):
     """
     root = Path(root_dir)
     leafs = []
-    # find every directory
+
+    # 1) if root itself has no subdirs, include it
+    if root.is_dir() and not any(child.is_dir() for child in root.iterdir()):
+        if "no_shift" not in p.name:
+            leafs.append(str(root))
+
+    # 2) now scan descendants
     for p in root.rglob('*'):
         if p.is_dir():
-            # check if it has any subdirectories
-            has_subdir = any(child.is_dir() for child in p.iterdir())
-            if not has_subdir:
-                leafs.append(str(p))
+            if not any(child.is_dir() for child in p.iterdir()):
+                if "no_shift" not in p.parts:
+                    leafs.append(str(p))
+
     return leafs
 
 if __name__ == "__main__":
     _start_time = time.perf_counter()
     _start_time_plot_results = time.perf_counter()
     
-    base_path = "../OCHRE_output/results_electric_heatpump_FHR/40_50_65 Gal Tanks" 
+    # base_path = "../OCHRE_output/results_electric_heatpump_FHR/40_50_65 Gal Tanks" 
+    base_path = "..\\OCHRE_output\\results_electric_heatpump_FHR_2\\40_50_65 Gal Tanks" 
     output_folders = get_output_folders(base_path)
     
     # Use ProcessPoolExecutor to run tasks concurrently across multiple processes.

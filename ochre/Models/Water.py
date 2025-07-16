@@ -156,7 +156,8 @@ class StratifiedWaterModel(RCModel):
                 self.draw_total += draw_tempered
             else:
                 vol_ratio = (self.tempered_draw_temp - self.mains_temp) / (self.outlet_temp - self.mains_temp)
-                self.draw_total += draw_tempered * vol_ratio
+                # self.draw_total += draw_tempered * vol_ratio
+                self.draw_total += draw_tempered
         # if draw_cw:
         #     if self.outlet_temp <= self.washer_draw_temp:
         #         self.draw_total += draw_cw

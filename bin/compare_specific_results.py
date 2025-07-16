@@ -3,6 +3,7 @@ import multiprocessing
 import os
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 import datetime
 import plotly.colors as pc
 import re
@@ -280,8 +281,22 @@ def plot_draw_event_summary(draw_outputs, plot_energy=False):
     ))
     
     # Update layout to display bars side by side
+    # fig.update_layout(
+    #     title=f'125 °F mixing valve 110 °F Cut off Temp FHR Summary by Tank Size & Setpoint ({y_axis_title})', 
+    #     xaxis_title='Tank Size & Setpoint',
+    #     yaxis_title=y_axis_title,
+    #     barmode='group',  # This ensures the bars are displayed side by side
+    #     legend=dict(
+    #         orientation="h",
+    #         yanchor="bottom",
+    #         y=1.02,
+    #         xanchor="center",
+    #         x=0.5
+    #     )
+    # )
+    
     fig.update_layout(
-        title=f'125 °F mixing valve 110 °F Cut off Temp FHR Summary by Tank Size & Setpoint ({y_axis_title})', 
+        title=f'No Mixing valve 110 °F Cut off Temp FHR Summary by Tank Size & Setpoint ({y_axis_title})', 
         xaxis_title='Tank Size & Setpoint',
         yaxis_title=y_axis_title,
         barmode='group',  # This ensures the bars are displayed side by side
@@ -568,7 +583,7 @@ def plot_comparison(dfs, draw_outputs):
 def c_to_f(c):
     return c * 9/5 + 32
 
-def process_single_df(file_key, df, first_hour_test=False):
+def process_single_df_hot_water_delivered(file_key, df, first_hour_test=False):
     """
     Process a single dataframe to calculate hot water delivered metrics.
     This is a worker function for parallel processing.
@@ -607,7 +622,8 @@ def process_single_df(file_key, df, first_hour_test=False):
     draw_events = []
     current_event = None
     
-    # Calculate time delta using the "Time" index
+    # Calculate time delta using the "Time" column
+    df_copy = df.copy()
     if not pd.api.types.is_numeric_dtype(df_copy.index):
         if pd.api.types.is_datetime64_any_dtype(df_copy.index):
             df_copy['time_delta'] = df_copy.index.to_series().diff().dt.total_seconds()
@@ -615,7 +631,7 @@ def process_single_df(file_key, df, first_hour_test=False):
             df_copy['time_delta'] = pd.to_numeric(df_copy.index.to_series().diff(), errors='coerce')
     else:
         df_copy['time_delta'] = df_copy.index.to_series().diff()
-    
+
     df_copy.fillna({'time_delta': 0}, inplace=True)
     
     for i, row in df_copy.iterrows():
@@ -651,7 +667,7 @@ def process_single_df(file_key, df, first_hour_test=False):
             
             # Only accumulate water and heat if the outlet temperature is high enough.
             if outlet_temp >= water_temp_cutoff:
-                water_volume = 3 / L_TO_GAL_RATIO / 120  # (L/min * s) gives liters
+                water_volume = 3 / L_TO_GAL_RATIO /120  # (L/min * s) gives liters
                 heat_energy = heat_output / 120    # (W * s) gives Joules
                 total_water_volume_L += water_volume
                 total_heat_delivered_J += heat_energy
@@ -757,7 +773,7 @@ def parallel_calculate_hot_water_delivered(dfs, first_hour_test=False, num_proce
     pool = multiprocessing.Pool(processes=min(num_processes, len(dfs)))
     
     # Create a partial function with fixed first_hour_test parameter
-    process_func = functools.partial(process_single_df, first_hour_test=first_hour_test)
+    process_func = functools.partial(process_single_df_hot_water_delivered, first_hour_test=first_hour_test)
     
     # Process each dataframe in parallel
     results = pool.starmap(process_func, dfs.items())
@@ -1064,8 +1080,8 @@ def create_energy_output_plots(dfs, uef_values):
     figure_metadata = []
     
     # Constants for energy calculation
-    DENSITY = 1000  # kg/m³
-    CP = 4184  # J/kg·K
+    DENSITY = 991.53  # kg/m³
+    CP = 4190  # J/kg·K
     INLET_TEMP_COL = 'Hot Water Mains Temperature (C)'
     OUTLET_TEMP_COL = 'Hot Water Outlet Temperature (C)'
     OUTLET_VOLUME_COL = 'Hot Water Delivered (L/min)'
@@ -1107,7 +1123,7 @@ def create_energy_output_plots(dfs, uef_values):
                 outlet_temp = pd.to_numeric(df[OUTLET_TEMP_COL], errors='coerce')
                 flow_rate = pd.to_numeric(df[OUTLET_VOLUME_COL], errors='coerce')
                 # time_values = pd.to_numeric(df['TimeStamp'], errors='coerce')
-                time_values = pd(df['Time'])
+                time_values = df['Time']
                 
                 # Drop any rows with NaN values
                 valid_mask = ~(inlet_temp.isna() | outlet_temp.isna() | flow_rate.isna() | time_values.isna())
@@ -1118,10 +1134,10 @@ def create_energy_output_plots(dfs, uef_values):
                     time_values = time_values[valid_mask].reset_index(drop=True)
                     
                     # Get effective outlet temperature (min of 125°F and actual outlet temp)
-                    effective_outlet_temp = outlet_temp.clip(upper=MAX_OUTLET_TEMP)
+                    effective_outlet_temp = outlet_temp
                     
-                    # Get effective flow rate (max of 3 gpm and actual flow rate)
-                    effective_flow_rate = flow_rate.clip(lower=MIN_FLOW_RATE)
+                    # Get tank outlet flow
+                    effective_flow_rate = flow_rate
                     
                     # Calculate delta T
                     delta_t = effective_outlet_temp - inlet_temp
@@ -1133,15 +1149,19 @@ def create_energy_output_plots(dfs, uef_values):
                     # Convert L/min to L/s by dividing by 60
                     # Convert L to m³ by dividing by 1000
                     flow_rate_m3_s = effective_flow_rate / (60 * 1000)
-                    instantaneous_power = DENSITY * CP * flow_rate_m3_s * delta_t
+                    m_dot = DENSITY * flow_rate_m3_s
+                    instantaneous_power = CP * m_dot * delta_t
                     instantaneous_power_kw = instantaneous_power / 1000  # Convert W to kW
                     
-                    # Calculate time step - using 0.5 seconds as fixed timestep
-                    time_step_seconds = 0.5
+                    # dynamically compute time step
+                    format_string = '%Y-%m-%d %H:%M:%S.%f'
+                    time_step = datetime.datetime.strptime(time_values[1], format_string) - datetime.datetime.strptime(time_values[0], format_string)
+
+                    time_step_seconds = time_step.total_seconds()
                     
                     # Calculate cumulative energy in kWh
-                    energy_increment_kwh = (instantaneous_power_kw * time_step_seconds) / 3600  # Convert to kWh
-                    cumulative_energy_kwh = energy_increment_kwh.cumsum()
+                    energy_increment_J = (instantaneous_power * time_step_seconds) # Convert to J
+                    cumulative_energy_kwh = energy_increment_J.cumsum()
                     total_energy_kwh = cumulative_energy_kwh.iloc[-1]
                     
             except Exception as e:
@@ -1316,14 +1336,14 @@ def create_energy_output_plots(dfs, uef_values):
         fig.update_layout(
             title=f'Energy Output - {file}<br>'
                   f'UEF: {uef:.3f} | PCM h: {pcm_h:.2f} W/m^2K | PCM SA Ratio: {pcm_sa:.2f} | PCM Mass: {pcm_mass:.3f} kg | '
-                  f'Water Volume: {water_volume_gal:.1f} gal | Total Energy: {total_energy_kwh:.2f} kWh',
+                  f'Water Volume: {water_volume_gal:.1f} gal | Total Energy: {total_energy_kwh:.2e} J',
             xaxis_title='Time',
             yaxis=dict(
                 title='Instantaneous Power (kW)',
                 side='left'
             ),
             yaxis2=dict(
-                title='Cumulative Energy (kWh)',
+                title='Cumulative Energy (J)',
                 side='right',
                 overlaying='y'
             ),
@@ -2524,50 +2544,51 @@ def plot_energy_comparison(dfs, energy_sums):
     
     return fig, {'type': 'energy_comparison'}
 
-def plot_pcm_enthalpies(df):
+def plot_pcm_enthalpies(profiles, names=None):
     """
-    Plot cp and Enthalpy vs Temperature on the same plot with dual y-axes.
-    
+    Plot cp and Enthalpy vs Temperature for multiple PCM profiles on the same plot,
+    using solid lines for cp and dashed lines for enthalpy, with distinct colors per PCM.
+
     Args:
-        df (numpy.ndarray): Array containing columns:
-                            'Temp (C)', 'cp (J/g-C)', and 'Enthalpy (J/kg)'
-    
+        profiles (list of np.ndarray): Each entry is an array with columns
+                                       [Temp (C), cp (J/g-C), Enthalpy (J/kg)].
+        names (list of str, optional): Labels for each PCM. Defaults to ['PCM 1', 'PCM 2', …].
+
     Returns:
-        fig (plotly.graph_objects.Figure): Plotly figure object.
+        go.Figure: Plotly figure object.
     """
-    
     fig = go.Figure()
+    colors = px.colors.qualitative.Plotly
+    n = len(profiles)
+    if names is None:
+        names = [f'PCM {i+1}' for i in range(n)]
+        
+    for i, df in enumerate(profiles):
+        color = colors[i % len(colors)]
+        label = names[i]
+        # cp curve: solid line, no markers
+        fig.add_trace(go.Scatter(
+            x=df[:, 0],
+            y=df[:, 1],
+            name=f'{label} cp',
+            mode='lines',
+            line=dict(color=color, dash='solid'),
+            yaxis='y1'
+        ))
+        # enthalpy curve: dashed line, no markers
+        fig.add_trace(go.Scatter(
+            x=df[:, 0],
+            y=df[:, 2],
+            name=f'{label} enthalpy',
+            mode='lines',
+            line=dict(color=color, dash='dash'),
+            yaxis='y2'
+        ))
 
-    # Plot cp vs Temperature on the primary y-axis
-    fig.add_trace(
-        go.Scatter(
-            x=df[:,0],  # Temperature
-            y=df[:,1],  # Specific Heat Capacity
-            name='cp (J/g-C)',
-            mode='lines+markers',
-            yaxis='y1'  # Attach to primary y-axis
-        )
-    )
-
-    # Plot Enthalpy vs Temperature on the secondary y-axis
-    fig.add_trace(
-        go.Scatter(
-            x=df[:,0],  # Temperature
-            y=df[:,2],  # Enthalpy
-            name='Enthalpy (J/kg)',
-            mode='lines+markers',
-            yaxis='y2'  # Attach to secondary y-axis
-        )
-    )
-
-    # Update layout with dual y-axis
     fig.update_layout(
         title='PCM cp and Enthalpy vs Temperature',
-        xaxis=dict(title='Temperature (C)'),
-        yaxis=dict(
-            title='cp (J/g-C)', 
-            showgrid=False
-        ),
+        xaxis=dict(title='Temperature (°C)'),
+        yaxis=dict(title='cp (J/g-°C)', showgrid=False),
         yaxis2=dict(
             title='Enthalpy (J/kg)',
             overlaying='y',
@@ -2577,7 +2598,6 @@ def plot_pcm_enthalpies(df):
         legend=dict(x=0.05, y=0.95),
         height=600
     )
-    
     return fig
 
 
@@ -2755,25 +2775,25 @@ def parallel_display_plots(plots, stagger_delay=0, num_processes=None):
 # Example usage:
 if __name__ == "__main__":
     # Load data
-    _start_time = time.perf_counter()
-    _start_time_plot_results = time.perf_counter()
-    print(os.getcwd())
+    # _start_time = time.perf_counter()
+    # _start_time_plot_results = time.perf_counter()
+    # print(os.getcwd())
     
-    dfs  = load_data(results_folder=graphing_results_folder)
-    print(f"Data loading time: {time.perf_counter() - _start_time:.2f} seconds")
+    # dfs  = load_data(results_folder=graphing_results_folder)
+    # print(f"Data loading time: {time.perf_counter() - _start_time:.2f} seconds")
     
-    _uef_time = time.perf_counter()
-    uef = calculate_uef(dfs)
-    print(f"UEF calculation time: {time.perf_counter() - _uef_time:.2f} seconds")
+    # _uef_time = time.perf_counter()
+    # uef = calculate_uef(dfs)
+    # print(f"UEF calculation time: {time.perf_counter() - _uef_time:.2f} seconds")
 
-    _pool_time = time.perf_counter()
-    all_plots = parallel_create_temperature_plots(dfs, uef_values=uef, patterns=['T_WH', 'T_PCM'])
-    print(f"Temp chart processing pool time: {time.perf_counter() - _pool_time:.2f} seconds")
+    # _pool_time = time.perf_counter()
+    # all_plots = parallel_create_temperature_plots(dfs, uef_values=uef, patterns=['T_WH', 'T_PCM'])
+    # print(f"Temp chart processing pool time: {time.perf_counter() - _pool_time:.2f} seconds")
     
-    # # Display all plots
-    _plot_time = time.perf_counter()
-    parallel_display_plots(all_plots, stagger_delay=0.1)  # 0.1 second delay between plots
-    print(f"Temp chart display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # # # # # Display all plots
+    # _plot_time = time.perf_counter()
+    # parallel_display_plots(all_plots, stagger_delay=0.1)  # 0.1 second delay between plots
+    # print(f"Temp chart display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
     # _plot_time = time.perf_counter()
     # all_plots = parallel_create_energy_output_plots(dfs, uef_values=uef, patterns=['T_WH', 'T_PCM'])
@@ -2790,21 +2810,30 @@ if __name__ == "__main__":
     # for fig in figures:
     #     fig.show()
 
-    # Draw data summary
-    _hot_water_delivered_pool_time = time.perf_counter()
-    output = parallel_calculate_hot_water_delivered(dfs, first_hour_test=True)
-    print(f"Hot water delivered pool time: {time.perf_counter() - _hot_water_delivered_pool_time:.2f} seconds")
+    # # Draw data summary
+    # _hot_water_delivered_pool_time = time.perf_counter()
+    # output = parallel_calculate_hot_water_delivered(dfs, first_hour_test=True)
+    # print(f"Hot water delivered pool time: {time.perf_counter() - _hot_water_delivered_pool_time:.2f} seconds")
     
-    _hot_water_plot_time = time.perf_counter()
-    plot_draw_event_summary(output)
-    print(f"Hot water plot time: {time.perf_counter() - _hot_water_plot_time:.2f} seconds")
+    # _hot_water_plot_time = time.perf_counter()
+    # plot_draw_event_summary(output)
+    # print(f"Hot water plot time: {time.perf_counter() - _hot_water_plot_time:.2f} seconds")
     
     # _hot_water_plot_time = time.perf_counter()
     # plot_draw_event_summary(output, plot_energy=True)
     # print(f"Hot water plot time: {time.perf_counter() - _hot_water_plot_time:.2f} seconds")
     
-    plot_draw_events(output)
+    # plot_draw_events(output)
     # plot_comparison(dfs, output)
+    pcms = [np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "Models", "cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1)]
+    pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "Models", "60-40_PCM55-TPU_cp-h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
+    pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "Models", "90-cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
+    
+    
+    pcms_names = ['Bulk PCM', '60% Encapsulated 40% Polymer PCM', '90% Infiltrated Graphite PCM']
+    
+    fig = plot_pcm_enthalpies(pcms, pcms_names)
+    fig.show()
     
     print(f"{BOLD}{GREEN}All Plots created in {time.perf_counter() - _start_time_plot_results:.2f} seconds{RESET}")
     

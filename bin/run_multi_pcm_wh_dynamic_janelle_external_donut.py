@@ -9,7 +9,7 @@ from ochre import (
     CreateFigures,
     ElectricResistanceWaterHeater,
 )
-from ochre.Models import TankWithMultiPCM
+from ochre.Models import TankWithMultiPCM, TankWithMultiPCMExternal
 from ochre.utils import convert
 import time
 from bin.run_dwelling import dwelling_args
@@ -41,7 +41,7 @@ DEFAULT_PCM_PROPERTIES = {
     "h_conv": 100,  # W/K, accounts for surface area (ha)
     "setpoint_temp": 50,  # C
     "solid": {
-        "pcm_density": 0.904,  # g/cm**3
+        "pcm_density": 0.991,  # g/cm**3 10% graphite 90% pcm
         "pcm_cp": 1.20,  # J/g-C # adjusted by real measurements average from 0-45c
         "pcm_conductivity": 0.28,  # W/m-C, not used
         # "pcm_c": 1717.6,  # J/m**3-C, not used
@@ -52,14 +52,16 @@ DEFAULT_PCM_PROPERTIES = {
         "pcm_conductivity": 0.16,  # W/m-C, not used
         # "pcm_c": 1823.8,  # J/m**3-C, not used
     },
-    "enthalpy_lut": "cp_h-T_data_shifted_120F.csv",
+    "enthalpy_lut": "90-cp_h-T_data_shifted_120F.csv",
+    "film_h": 50,
+    "external_pcm_thickness_in": 0.5
 }
 
 num_points = 10
 
-sa_ratios = [15]
+sa_ratios = [30]
 # sa_ratios = [5, 10, 15, 20, 25, 30]
-h_values = [500]
+h_values = [5000]
 # h_values = np.logspace(np.log10(50), np.log10(5000), num_points)
 
 
@@ -71,18 +73,27 @@ pcm_file_names = [
     "cp_h-T_data_shifted_140F.csv",
 ]
 
+simulation_duration_days = 220
 
-pcm_file_names = ['cp_h-T_data_shifted_120F.csv']
-# pcm_file_names = ['cp_h-T_data_52_6C.csv']s
+# pcm_file_names = ['cp_h-T_data_shifted_120F.csv']
+pcm_file_names = ['90-cp_h-T_data_shifted_120F.csv']
 
-setpoint_temps_f = [140]
+setpoint_temps_f = [125]
 # setpoint_temps_f = [125, 140]
 setpoint_temps_c = [
     (setpoint_temp - 32) * (5 / 9) for setpoint_temp in setpoint_temps_f
 ]
 
+# films_h = np.linspace(50, 1000, 11)
+# logarithmic range spacing
+films_h = np.logspace(np.log10(50), np.log10(1000), 11)
+pcms_thickness_in = np.linspace(0.1, 1.25, 11)
+
+# films_h = [50]
+# pcms_thickness_in = [0.5, 1]
+
 # tank_volume_gal = [40,50, 65]
-tank_volume_gal = [50]
+tank_volume_gal = [40]
 
 
 vol_fract = 0.00000001  # 1.540e-06 kg
@@ -106,14 +117,15 @@ for vol_fract in vol_fracs:
     )
 
 
+
 load_profile = "2.00gpm30min_0gpm180min_cycling.csv"
 load_profile = "2.00gpm30min_0gpm600min_cycling.csv"
 load_profile = "2.00gpm120min_0gpm600min_cycling.csv"
 load_profile = "MediumUseL.csv"
 load_profile = "2.00gpm_1200minStartIdle_2cycles_30minDraw_240minOff_0minEndIdle.csv"
-load_profile = "2.00gpm_1200minStartIdle_2cycles_30minDraw_240minOff_0minEndIdle_Single_draw.csv"
+load_profile = "2.00gpm_1200minStartIdle_ 2cycles_30minDraw_240minOff_0minEndIdle_Single_draw.csv"
 load_profiles = ["MediumUseL.csv", "2.00gpm30min_0gpm600min_cycling.csv"]
-
+load_profile = "net_flow_90023_220day.csv"
 
 def convert_dict_to_name(dict):
     # Check if all values are the same
@@ -133,20 +145,23 @@ def convert_dict_to_name(dict):
 
 def add_pcm_model(default_args, name, pcm_vol_fractions, pcm_properties):
     
-    default_args['model_class'] = TankWithMultiPCM
+    default_args['model_class'] = TankWithMultiPCMExternal
+    # default_args['model_class'] = TankWithMultiPCM
     default_args['water_nodes'] = 12
+    # default_args['Water Tank'] = {
+    #     'pcm_node_vol_fractions': pcm_vol_fractions,
+    #     'pcm_properties': pcm_properties,
+    # }
+
     default_args['Water Tank'] = {
-        'pcm_node_vol_fractions': pcm_vol_fractions,
         'pcm_properties': pcm_properties,
     }
-
     default_args["name"] = name
     return default_args
 
 default_args = {
     "start_time": dt.datetime(2018, 1, 1, 0, 0),  # year, month, day, hour, minute
     "time_res": dt.timedelta(minutes=1),
-    # "duration": dt.timedelta(days=2),
     "verbosity": 9,
     "save_results": None,  # if True, must specify output_path # None Merges the simulator results into 1 file
     "output_path": '../OCHRE_output/OCHRE_results/results/',
@@ -155,20 +170,46 @@ default_args = {
 }
 
 def import_water_heating_schedule(schedule_file):
-    # Import water heating schedule file
+    """
+    Reads in a one-column CSV (which may or may not have a header row).
+    If the first row is non-numeric, treat it as a header and drop it from the data.
+    Otherwise, treat all rows as data and assign a default column name of 0.
+    Finally, clip to 220*1440 rows, reset_index, and return that DataFrame.
+    """
     try:
+        # 1) Read everything as data, no header inference
+        raw = pd.read_csv(f"ochre/defaults/Input Files/{schedule_file}", header=None)
 
-        df = pd.read_csv(f"ochre/defaults/Input Files/{schedule_file}")
-        
-        hot_water_schedule = df.loc[:, 'hot_water_fixtures']
-        #clip to 2880 points
-        hot_water_schedule = hot_water_schedule.iloc[0:2880]
-    
+        # 2) Peek at the very first cell of raw
+        first_val = raw.iloc[0, 0]
+
+        # 3) Try to coerce it to float; if that fails, we assume it was meant to be a header
+        try:
+            float(first_val)
+            is_numeric = True
+        except ValueError:
+            is_numeric = False
+
+        if not is_numeric:
+            # --- Case A: first row is a real header (string) ---
+            col_name = str(first_val)           # e.g. "withdraw_rate_lpm" or whatever text was in row 0
+            data = raw.iloc[1:].copy()          # drop row 0 from the data
+            data.columns = [col_name]           # assign that string as the column name
+        else:
+            # --- Case B: first row is just numeric data (no header in file) ---
+            data = raw.copy()
+            data = data[0]           
+
+        # 4) Clip to day_minutes
+        day_minutes = simulation_duration_days * 1440               # as before
+        hot_water_schedule = data.iloc[:day_minutes]
+
     except Exception as e:
         print(f"Error importing water heating schedule file: {e}")
+        hot_water_schedule = pd.DataFrame(columns=[0])  # return an empty frame on failure
     finally:
         print(os.getcwd())
-        
+
     return hot_water_schedule
         
     
@@ -564,26 +605,32 @@ def run_water_heater_electric(default_args, setpoint_temp, tank_volume):
 
     if default_args.get('schedule_input_file', None) is None:
         schedule = create_water_schedule(setpoint_default=setpoint_temp, withdraw_rate_gpm=0, no_heating_during_draw=False)
+        duration = dt.timedelta(days=2)
     else:
         hot_water_schedule = import_water_heating_schedule(default_args.get('schedule_input_file'))
         times = pd.date_range(dt.datetime(2018, 1, 1, 0, 0), dt.datetime(2018, 1, 1, 0, 0) + dt.timedelta(minutes=len(hot_water_schedule)), freq=dt.timedelta(minutes=1), inclusive="left")
+        duration = times[-1] - times[0]
         schedule = create_water_schedule(withdraw_rate_lpm=hot_water_schedule, setpoint_default=setpoint_temp, no_heating_during_draw=False, times=times)
         
 
 
-    hot_water_temp = convert(110, 'degF', 'degC') 
+    hot_water_temp = convert(110, 'degF', 'degC')
+    if not duration:
+        duration = dt.timedelta(days=2)
     equipment_args = {
         # Equipment parameters
         # "Setpoint Temperature (C)": 14.4444,
         "Setpoint Temperature (C)": setpoint_temp,
         "Tank Volume (L)": tank_volume * GAL_TO_L * 0.9,
         "Tank Height (m)": 1.22,
-        # "UA (W/K)": 2.17,
-        "UA (W/K)": 1e-9, 
+        "UA (W/K)": 2.17,
+        # "UA (W/K)": 1e-9, 
         # "schedule": schedule,
         "Capacity (W)": 4500,
         "water_nodes": 12,
+        "duration": duration,
         **default_args,
+        # "time_res": dt.timedelta(minutes=1),
         "time_res": dt.timedelta(seconds=0.5),
     }
 
@@ -594,7 +641,7 @@ def run_water_heater_electric(default_args, setpoint_temp, tank_volume):
     if default_args.get('schedule_input_file', None) is None:
         hot_water_output_gallons, wh = simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_during_draw=False, first_hour_duration=60, draw_rate_gpm=3, allow_setpoint_start=False, hot_water_temp_f=110, setpoint_temp_f=140)
     else:
-        wh.simulate()
+        wh.simulate(duration=duration)
         
     df = wh.finalize()
 
@@ -611,6 +658,19 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
     # setpoint_default = setpoint_temp  # in C
     # deadband_default = 5.56  # in C
     hot_water_temp = convert(110, 'degF', 'degC') 
+
+    if default_args.get('schedule_input_file', None) is None:
+        schedule = create_water_schedule(setpoint_default=setpoint_temp, withdraw_rate_gpm=0, no_heating_during_draw=False)
+        duration = dt.timedelta(days=2)
+    else:
+        hot_water_schedule = import_water_heating_schedule(default_args.get('schedule_input_file'))
+        times = pd.date_range(dt.datetime(2018, 1, 1, 0, 0), dt.datetime(2018, 1, 1, 0, 0) + dt.timedelta(minutes=len(hot_water_schedule)), freq=dt.timedelta(minutes=1), inclusive="left")
+        duration = times[-1] - times[0]
+        schedule = create_water_schedule(withdraw_rate_lpm=hot_water_schedule, setpoint_default=setpoint_temp, no_heating_during_draw=False, times=times)
+        
+        
+    if not duration:
+        duration = dt.timedelta(days=2)
     equipment_args = {
         "verbosity": 9,  # required to get setpoint and deadband in results
         "save_results": None,  # if True, must specify output_path None Merges the simulator results into 1 file
@@ -619,21 +679,15 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
         "Setpoint Temperature (C)": setpoint_temp,
         "Tank Volume (L)": tank_volume * GAL_TO_L * 0.9,
         "Tank Height (m)": 1.22,
-        # "UA (W/K)": 2.17,
-        "UA (W/K)": 1e-9,
+        "UA (W/K)": 2.17,
+        # "UA (W/K)": 1e-9,
         "HPWH COP (-)": 4.5,
+        "duration": duration,
         **default_args,
+        # "time_res": dt.timedelta(minutes=1),
         "time_res": dt.timedelta(seconds=0.5),
-        # "hp_only_mode": True
+        "hp_only_mode": True
     }
-
-    if default_args.get('schedule_input_file', None) is None:
-        schedule = create_water_schedule(setpoint_default=setpoint_temp, withdraw_rate_gpm=0, no_heating_during_draw=False)
-    else:
-        hot_water_schedule = import_water_heating_schedule(default_args.get('schedule_input_file'))
-        times = pd.date_range(dt.datetime(2018, 1, 1, 0, 0), dt.datetime(2018, 1, 1, 0, 0) + dt.timedelta(minutes=len(hot_water_schedule)), freq=dt.timedelta(minutes=1), inclusive="left")
-        schedule = create_water_schedule(withdraw_rate_lpm=hot_water_schedule, setpoint_default=setpoint_temp, no_heating_during_draw=False, times=times)
-        
 
     deadband_default = schedule['Water Heating Deadband (C)'].iloc[0]
     # Initialize equipment
@@ -757,26 +811,26 @@ if __name__ == "__main__":
         for tank_volume in tank_volume_gal:
             for setpoint_temp_c, setpoint_temp_f in zip(setpoint_temps_c, setpoint_temps_f):
                 # Electric water heater
-                submission_time = time.perf_counter()
-                current_default_args = copy.deepcopy(default_args_default)
-                no_pcm_title = f"{no_pcm_electric_title_base}_setpoint-{setpoint_temp_f:.0f}F_{tank_volume}gal_{i}"
-                current_default_args["name"] = no_pcm_title
-                no_pcm_future_electric = pool.apply_async(
-                    run_water_heater_process,
-                    (
-                        current_default_args,
-                        tank_volume,
-                        setpoint_temp_c,
-                        no_pcm_title,
-                        submission_time,
-                    ),
-                )
-                async_results.append(no_pcm_future_electric)
-                print(
-                    f"{YELLOW}Submitted default {no_pcm_title} simulation to queue{RESET}"
-                )
+                # submission_time = time.perf_counter()
+                # current_default_args = copy.deepcopy(default_args_default)
+                # no_pcm_title = f"{no_pcm_electric_title_base}_setpoint-{setpoint_temp_f:.0f}F_{tank_volume}gal_{i}"
+                # current_default_args["name"] = no_pcm_title
+                # no_pcm_future_electric = pool.apply_async(
+                #     run_water_heater_process,
+                #     (
+                #         current_default_args,
+                #         tank_volume,
+                #         setpoint_temp_c,
+                #         no_pcm_title,
+                #         submission_time,
+                #     ),
+                # )
+                # async_results.append(no_pcm_future_electric)
+                # print(
+                #     f"{YELLOW}Submitted default {no_pcm_title} simulation to queue{RESET}"
+                # )
                 
-                i += 1
+                # i += 1
                 # Heat pump water heater
                 submission_time = time.perf_counter()
                 current_default_args = copy.deepcopy(default_args_default)
@@ -806,81 +860,85 @@ if __name__ == "__main__":
                     for pcm_vol_fraction in pcm_vol_fractions:
                         for sa_ratio in sa_ratios:
                             for h_value in h_values:
-                                # electric water heater
-                                # Create fresh copy of default args for each simulation
-                                current_default_args = copy.deepcopy(default_args_default)
-                                current_pcm_properties = copy.deepcopy(DEFAULT_PCM_PROPERTIES)
-                                current_pcm_properties['setpoint_temp'] = setpoint_temp_c
-                                current_pcm_properties["sa_ratio"] = sa_ratio
-                                current_pcm_properties["h"] = h_value
-                                current_pcm_properties['enthalpy_lut'] = pcm_file_name
+                                for film_h in films_h:
+                                    for external_pcm_thickness_in in pcms_thickness_in:
+                                        # electric water heater
+                                        # Create fresh copy of default args for each simulation
+                                        # current_default_args = copy.deepcopy(default_args_default)
+                                        # current_pcm_properties = copy.deepcopy(DEFAULT_PCM_PROPERTIES)
+                                        # current_pcm_properties['setpoint_temp'] = setpoint_temp_c
+                                        # current_pcm_properties["sa_ratio"] = sa_ratio
+                                        # current_pcm_properties["h"] = h_value
+                                        # current_pcm_properties['enthalpy_lut'] = pcm_file_name
 
-                                # Add PCM model with specific volume fraction
-                                model_name = convert_dict_to_name(pcm_vol_fraction)
+                                        # # Add PCM model with specific volume fraction
+                                        # model_name = convert_dict_to_name(pcm_vol_fraction)
 
-                                model_name = f"{model_name}_Electric_SA-{sa_ratio:.2f}_H-{h_value:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
-                                i += 1
-                                current_default_args = add_pcm_model(
-                                    current_default_args,
-                                    model_name,
-                                    pcm_vol_fraction,
-                                    current_pcm_properties,
-                                )
+                                        # model_name = f"{model_name}_Electric_SA-{sa_ratio:.2f}_H-{h_value:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
+                                        # i += 1
+                                        # current_default_args = add_pcm_model(
+                                        #     current_default_args,
+                                        #     model_name,
+                                        #     pcm_vol_fraction,
+                                        #     current_pcm_properties,
+                                        # )
 
-                                # Record submission time for this task
-                                submission_time = time.perf_counter()
-                                async_result = pool.apply_async(
-                                    run_water_heater_process,
-                                    (
-                                        current_default_args,
-                                        tank_volume,
-                                        setpoint_temp_c,
-                                        model_name,
-                                        submission_time,
-                                    ),
-                                )
-                                async_results.append(async_result)
-                                print(
-                                    f"{YELLOW}Submitted {model_name} simulation to queue{RESET}"
-                                )
-                                # heat pump water heater
-                                 # Create fresh copy of default args for each simulation
-                                current_default_args = copy.deepcopy(default_args_default)
-                                current_default_args['is_heatpump'] = True
-                                current_pcm_properties = copy.deepcopy(DEFAULT_PCM_PROPERTIES)
-                                current_pcm_properties['setpoint_temp'] = setpoint_temp_c
-                                current_pcm_properties["sa_ratio"] = sa_ratio
-                                current_pcm_properties["h"] = h_value
-                                current_pcm_properties['enthalpy_lut'] = pcm_file_name
+                                        # # Record submission time for this task
+                                        # submission_time = time.perf_counter()
+                                        # async_result = pool.apply_async(
+                                        #     run_water_heater_process,
+                                        #     (
+                                        #         current_default_args,
+                                        #         tank_volume,
+                                        #         setpoint_temp_c,
+                                        #         model_name,
+                                        #         submission_time,
+                                        #     ),
+                                        # )
+                                        # async_results.append(async_result)
+                                        # print(
+                                        #     f"{YELLOW}Submitted {model_name} simulation to queue{RESET}"
+                                        # )
+                                        # heat pump water heater
+                                        # Create fresh copy of default args for each simulation
+                                        current_default_args = copy.deepcopy(default_args_default)
+                                        current_default_args['is_heatpump'] = True
+                                        current_pcm_properties = copy.deepcopy(DEFAULT_PCM_PROPERTIES)
+                                        current_pcm_properties['setpoint_temp'] = setpoint_temp_c
+                                        current_pcm_properties["sa_ratio"] = sa_ratio
+                                        current_pcm_properties["h"] = h_value
+                                        current_pcm_properties['enthalpy_lut'] = pcm_file_name
+                                        current_pcm_properties['film_h'] = film_h
+                                        current_pcm_properties['external_pcm_thickness_in'] = external_pcm_thickness_in
 
-                                # Add PCM model with specific volume fraction
-                                model_name = convert_dict_to_name(pcm_vol_fraction)
+                                        # Add PCM model with specific volume fraction
+                                        model_name = convert_dict_to_name(pcm_vol_fraction)
 
-                                model_name = f"{model_name}_Heatpump_SA-{sa_ratio:.2f}_H-{h_value:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
-                                i += 1
-                                current_default_args = add_pcm_model(
-                                    current_default_args,
-                                    model_name,
-                                    pcm_vol_fraction,
-                                    current_pcm_properties,
-                                )
+                                        model_name = f"Heatpump_thickness-{external_pcm_thickness_in:.2f}_water_side_film_h-{film_h:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
+                                        i += 1
+                                        current_default_args = add_pcm_model(
+                                            current_default_args,
+                                            model_name,
+                                            pcm_vol_fraction,
+                                            current_pcm_properties,
+                                        )
 
-                                # Record submission time for this task
-                                submission_time = time.perf_counter()
-                                async_result = pool.apply_async(
-                                    run_water_heater_process,
-                                    (
-                                        current_default_args,
-                                        tank_volume,
-                                        setpoint_temp_c,
-                                        model_name,
-                                        submission_time,
-                                    ),
-                                )
-                                async_results.append(async_result)
-                                print(
-                                    f"{YELLOW}Submitted {model_name} simulation to queue{RESET}"
-                                )
+                                        # Record submission time for this task
+                                        submission_time = time.perf_counter()
+                                        async_result = pool.apply_async(
+                                            run_water_heater_process,
+                                            (
+                                                current_default_args,
+                                                tank_volume,
+                                                setpoint_temp_c,
+                                                model_name,
+                                                submission_time,
+                                            ),
+                                        )
+                                        async_results.append(async_result)
+                                        print(
+                                            f"{YELLOW}Submitted {model_name} simulation to queue{RESET}"
+                                        )
 
         # Collect results from all simulations with improved error handling
         for async_result in async_results:

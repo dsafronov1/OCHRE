@@ -4,6 +4,8 @@ import math
 
 from ochre.Models import StratifiedWaterModel
 
+from typing import Dict, Optional
+
 
 
 
@@ -25,13 +27,13 @@ DEFAULT_PCM_PROPERTIES = {
     "solid": {
         "pcm_density": 0.904,  # g/cm**3
         "pcm_cp": 1.20,  # J/g-C # adjusted by real measurements average from 0-45c
-        "pcm_conductivity": 0.28,  # W/m-C, not used
+        "pcm_conductivity":2.6,  # W/m-C, not used
         # "pcm_c": 1717.6,  # J/m**3-C, not used
     },
     "liquid": {
         "pcm_density": 0.829,  # g/cm**3
         "pcm_cp": 1.33,  # J/g-C # adjusted by real measurements average from 55-100c
-        "pcm_conductivity": 0.16,  # W/m-C, not used
+        "pcm_conductivity": 2.6,  # W/m-C, not used
         # "pcm_c": 1823.8,  # J/m**3-C, not used
     },
     "enthalpy_lut": np.loadtxt(os.path.join(os.path.dirname(__file__), "cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1)
@@ -207,6 +209,7 @@ class TankWithMultiPCM(StratifiedWaterModel):
         self.pcm_heat_to_water_rc_network = None
         self.enthalpy_pcm = None
         self.pcm_properties = pcm_properties
+
         
         pcm_file = self.pcm_properties.get('enthalpy_lut') or 'cp_h-T_data_52_6C.csv'
         full_path = os.path.join(os.path.dirname(__file__), pcm_file)
@@ -554,3 +557,455 @@ class TankWithMultiPCM(StratifiedWaterModel):
 
             
         return results
+    
+    
+    
+    
+class TankWithMultiPCMExternal(StratifiedWaterModel):
+
+    """Stratified electric water-heater with a concentric external PCM layer."""
+
+    name = "Water Tank with External PCM"
+    def __init__(
+        self,
+        pcm_properties: Dict,
+        *,
+        pcm_thickness_in: float = 1,
+        pcm_split_thickness_in: float = 0.005,     # in PCM thickness
+        insulation_thickness_in: float = 2,       # in insulation thickness
+        insulation_k_value: float = 0.05,         # W/m·K
+        insulation_cp_value: float = 1000.0,      # J/kg·K
+        insulation_density: float = 40.0,         # kg/m³
+        enamel_thickness_in: float = 0.008,       # ≈0.2 mm glass-enamel
+        enamel_k_value: float = 1.0,              # W/m·K (vitreous enamel)
+        enamel_cp_value: float = 840.0,           # J/kg·K (glass)
+        enamel_density: float = 2500.0,           # kg/m³ (glass)
+        steel_wall_thickness_in: float = 0.1,      # ≈2.75 mm total wall
+        steel_k_value: float = 55.0,              # W/m·K mildsteel
+        steel_cp_value: float = 490.0,            # J/kg·K mild steel
+        steel_density: float = 7850.0,            # kg/m³
+        water_side_film_h: float | None = 50,    # W/m²·K
+        **kwargs,
+    ) -> None:
+        """Parameters
+        ----------
+        pcm_thickness_in: float The thickness of the PCM external to the tank in inches
+        """
+        IN_TO_M = 0.0254
+        # Store material properties
+        self.pcm_properties = pcm_properties.copy()
+        self.insulation_k_value = insulation_k_value
+        self.insulation_cp_value = insulation_cp_value
+        self.insulation_density = insulation_density
+        self.enamel_k_value = enamel_k_value
+        self.enamel_cp_value = enamel_cp_value
+        self.enamel_density = enamel_density
+        self.steel_k_value = steel_k_value
+        self.steel_cp_value = steel_cp_value
+        self.steel_density = steel_density
+
+        # ------------------------------------------------------------------
+        # Pre‑load PCM enthalpy lookup table
+        pcm_file = self.pcm_properties.get("enthalpy_lut", "cp_h-T_data_52_6C.csv")
+        full_path = os.path.join(os.path.dirname(__file__), pcm_file)
+        self.pcm_properties["enthalpy_lut"] = np.loadtxt(full_path, delimiter=",", skiprows=1)
+        self.pcm_properties["enthalpy_lut_file"] = pcm_file
+
+        # Fallback for water‑side film‑coefficient
+        self.water_side_film_h = self.pcm_properties.get('film_h')
+        self.pcm_thickness_in = self.pcm_properties.get('external_pcm_thickness_in')
+        self.external_nodes = ['AMB']
+
+        # ------------------------------------------------------------------
+        # Geometry needed *before* parent init so that volumes are correct
+        self.tank_height_m = kwargs.get("tank_height_m", 4 * 0.3048)   # 4 ft default
+        self.volume_L = kwargs.get("volume", 136.275)                   # 40 gal tank default
+        self.volume_m3 = self.volume_L / 1e3
+        self.tank_radius_m = math.sqrt(self.volume_m3 / (math.pi * self.tank_height_m))
+        self.internal_area_m2 = 2 * math.pi * self.tank_radius_m * self.tank_height_m
+        self.top_area_m2 = math.pi * self.tank_radius_m**2
+        self.shell_area_m2 = self.internal_area_m2 + 2 * self.top_area_m2
+
+        # Convert thicknesses to meters
+        self.enamel_thickness_m = float(enamel_thickness_in * IN_TO_M)
+        self.steel_wall_thickness_m = float(steel_wall_thickness_in * IN_TO_M)
+        self.insulation_thickness_m = float(insulation_thickness_in * IN_TO_M)
+        self.pcm_thickness_m = float(self.pcm_thickness_in * IN_TO_M)
+
+        # ------------------------------------------------------------------
+        # Compute U-values for each layer
+        # Enamel layer
+        enamel_inner_r = self.tank_radius_m
+        enamel_mean_r = enamel_inner_r + self.enamel_thickness_m / 2
+        self.enamel_u_value_W_per_m2_K = (
+            self.enamel_k_value
+            / (enamel_mean_r * math.log((enamel_inner_r + self.enamel_thickness_m) / enamel_inner_r))
+        )
+        # Steel wall layer
+        steel_inner_r = self.tank_radius_m - self.enamel_thickness_m
+        steel_mean_r = steel_inner_r + self.steel_wall_thickness_m / 2
+        self.steel_u_value_W_per_m2_K = (
+            self.steel_k_value
+            / (steel_mean_r * math.log((steel_inner_r + self.steel_wall_thickness_m) / steel_inner_r))
+        )
+        # Insulation layer
+        ins_inner_r = self.tank_radius_m + self.pcm_thickness_m
+        ins_mean_r = ins_inner_r + self.insulation_thickness_m / 2
+        self.insulation_u_value_W_per_m2_K = (
+            self.insulation_k_value
+            / (ins_mean_r * math.log((ins_inner_r + self.insulation_thickness_m) / ins_mean_r))
+        )
+
+        # --------------------------------------------------------------- parent
+        super().__init__(**kwargs)
+
+        # -------------------------------------------------------------- post-init
+
+        self.key_temp, self.key_specific_heats, self.key_enthalpy = calculate_interpolation_data(self.pcm_properties)
+        self.key_temp, self.key_cp_pcm, self.key_enthalpy_pcm = calculate_interpolation_data(self.pcm_properties)
+        self.key_enthalpy *= self.pcm_mass_kg * 1e3 # make sure mass is in grams due to pcm file units
+        
+        
+        # Dynamic state bookkeeping
+        self.t_pcm_idx = [i for i, name in enumerate(self.state_names) if "T_PCM" in name]
+        self.h_pcm_idx = [i for i, name in enumerate(self.input_names) if "H_PCM" in name]
+        # assert [self.state_names.index(f"T_WH{node}") for node in self.pcm_water_nodes] == self.t_pcm_wh_idx
+        # self.h_pcm_wh_idx = [self.input_names.index(f"H_WH{node}") for node in self.pcm_water_nodes]
+        
+        self.t_pcm_wh_idx = [x for x in range(1, len(self.state_names)+1) if f"T_WH{x}" in self.state_names]
+        
+        self.enthalpy_pcm: np.ndarray = np.interp(
+            self.states[self.t_pcm_idx], self.key_temp, self.key_enthalpy_pcm * self.pcm_mass_kg*1e3
+        )
+
+        
+    
+
+    def load_rc_data(self, **kwargs):
+        include_axial = kwargs.get("include_axial_conduction", True)
+        rc = super().load_rc_data(**kwargs)
+
+        n_nodes = len(self.vol_fractions)
+        A_layer = self.internal_area_m2 / n_nodes
+        L_layer = self.tank_height_m / n_nodes
+        start_T = kwargs.get("Setpoint Temperature (C)", 51.6666667)
+
+        # material props
+        rho_en = kwargs.get("rho_enamel", self.enamel_density)
+        c_en   = kwargs.get("c_enamel",   self.enamel_cp_value)
+        rho_st = kwargs.get("rho_steel",  self.steel_density)
+        c_st   = kwargs.get("c_steel",    self.steel_cp_value)
+        rho_ins= kwargs.get("rho_ins",    self.insulation_density)
+        c_ins  = kwargs.get("c_ins",      self.insulation_cp_value)
+        k_en   = kwargs.get("k_enamel",   self.enamel_k_value)
+        k_st   = kwargs.get("k_steel",    self.steel_k_value)
+        k_pcm  = self.pcm_properties["solid"]["pcm_conductivity"]
+        k_ins  = kwargs.get("insulation_k_value", self.insulation_k_value)
+        h_ext  = kwargs.get("h_ext",       8.0)
+
+        # radii for layers
+        r_w   = self.tank_radius_m
+        r_en  = r_w + self.enamel_thickness_m
+        r_st  = r_en + self.steel_wall_thickness_m
+        r_pcm = r_st + self.pcm_thickness_m
+        r_ins = r_pcm + self.insulation_thickness_m
+
+        # mid radii for axial conduction areas
+        r_mid_en  = r_w + 0.5*self.enamel_thickness_m
+        r_mid_st  = r_en + 0.5*self.steel_wall_thickness_m
+        r_mid_pcm = r_st + 0.5*self.pcm_thickness_m
+        r_mid_ins = r_pcm + 0.5*self.insulation_thickness_m
+
+        A_vert_en  = 2*math.pi*r_mid_en * self.enamel_thickness_m
+        A_vert_st  = 2*math.pi*r_mid_st * self.steel_wall_thickness_m
+        A_vert_pcm = 2*math.pi*r_mid_pcm* self.pcm_thickness_m
+        A_vert_ins = 2*math.pi*r_mid_ins* self.insulation_thickness_m
+
+        # helper: radial conduction
+        def R_cond(k, r1, r2):
+            return math.log(r2/r1) / (2*math.pi * k * L_layer)
+
+        # compute capacitances & masses per layer
+        # enamel
+        vol_en = math.pi * (r_en**2-r_w**2) * L_layer
+        mass_en = rho_en * vol_en
+        C_en = mass_en * c_en
+        # steel
+        vol_st = math.pi * (r_st**2-r_en**2) * L_layer
+        mass_st = rho_st * vol_st
+        C_st = mass_st * c_st
+        # pcm
+        vol_pcm = math.pi*(r_pcm**2-r_st**2) * L_layer
+        mass_pcm = self.pcm_properties["solid"]["pcm_density"] * vol_pcm * 1e3 * 1e3 # make sure mass in g
+        cp_pcm = np.interp(start_T,
+                           self.pcm_properties["enthalpy_lut"][:,0],
+                           self.pcm_properties["enthalpy_lut"][:,1])
+        C_pcm = mass_pcm * cp_pcm
+        # insulation
+        vol_ins = math.pi * (r_ins**2-r_pcm**2) * L_layer
+        mass_ins = rho_ins * vol_ins
+        C_ins = mass_ins * c_ins
+
+        # initialize PCM mass dictionary
+        self.pcm_mass_dict = {}
+        self.pcm_mass_kg = 0
+
+        # build RC network per stratum
+        for i in range(1, n_nodes+1):
+            # water -> enamel convective
+            rc[f"R_WH{i}_ENM{i}"] = 1.0 / (self.water_side_film_h * A_layer)
+            # enamel
+            rc[f"C_ENM{i}"]      = C_en
+            rc[f"R_ENM{i}_STL{i}"] = R_cond(k_en, r_w, r_en)
+            # steel
+            rc[f"C_STL{i}"]       = C_st
+            rc[f"R_STL{i}_PCM{i}"] = R_cond(k_st, r_en, r_st)
+            # PCM
+            rc[f"C_PCM{i}"]       = C_pcm
+            self.pcm_mass_dict[i]   = mass_pcm
+            self.pcm_mass_kg += mass_pcm * 1e-3
+            rc[f"R_PCM{i}_INS{i}"] = R_cond(k_pcm, r_st, r_pcm)
+            # insulation
+            rc[f"C_INS{i}"]       = C_ins
+            R_ins_r = R_cond(k_ins, r_pcm, r_ins)
+            A_out = 2*math.pi*r_ins*L_layer + 2*math.pi*r_ins**2/n_nodes
+            rc[f"R_INS{i}_AMB"]   = R_ins_r + 1.0/(h_ext * A_out)
+
+            # axial conduction
+            if include_axial and i < n_nodes:
+                ni = i + 1
+                rc[f"R_ENM{i}_ENM{ni}"] = L_layer / (k_en  * A_vert_en)
+                rc[f"R_STL{i}_STL{ni}"] = L_layer / (k_st  * A_vert_st)
+                rc[f"R_PCM{i}_PCM{ni}"] = L_layer / (k_pcm * A_vert_pcm)
+                rc[f"R_INS{i}_INS{ni}"] = L_layer / (k_ins * A_vert_ins)
+
+        # remove original water->amb resistances
+        for i in range(1, n_nodes+1):
+            rc.pop(f"R_WH{i}_AMB", None)
+
+        self.rc_params = rc
+        return rc
+    
+    def update_rc_network(self, t_pcm, **kwargs):
+        '''Get the dynamic specific heat for each of the pcm nodes and update the capacitance in the rc_network'''
+        
+        pcm_specific_heats = np.interp(t_pcm, self.key_temp, self.key_specific_heats)
+        
+
+        # Loop over each PCM node and apply the modifications
+        for i, node in enumerate(self.pcm_mass_dict.items()):
+            
+            index = node[0]
+            pcm_node_mass = node[1]
+            pcm_specific_heat = pcm_specific_heats[i]
+
+            
+            # Update the capacitance for this node (in J/K)
+            self.rc_params[f"C_PCM{index}"] = pcm_specific_heat * pcm_node_mass
+            # self.rc_params[f"C_PCM{node}"] = 1e-3
+        return self.rc_params
+        
+    def update_state_space_model(self, **kwargs):
+        
+        pcm_temps = self.next_states[self.t_pcm_idx]
+        dynamic_rc_params = self.update_rc_network(pcm_temps)
+        all_cap = {name.upper().split('_')[1:][0]: val 
+               for name, val in dynamic_rc_params.items() if name[0] == 'C'}
+        all_res = {tuple(name.upper().split('_')[1:]): val 
+                for name, val in dynamic_rc_params.items() if name[0] == 'R'}
+        
+        # You may need to re-identify internal/external nodes if not stored already
+        internal_nodes = [node for node in all_cap.keys()]
+        
+        external_nodes = [node for node in self.external_nodes]  # assuming these were stored
+        
+        # Recompute the state-space matrices
+        A_c, B_c = self.create_rc_matrices(all_cap, all_res, internal_nodes, external_nodes)
+        
+        # Update the model’s matrices
+        self.A = A_c
+        self.B = B_c
+        self.capacitances = np.array(list(all_cap.values()))
+        
+        # Define state and input names
+        state_names = ['T_' + node for node in internal_nodes]
+        input_names = ['T_' + node for node in external_nodes] + ['H_' + node for node in internal_nodes]
+        
+        outputs = None
+        matrices=(A_c, B_c)
+        
+        # if unused_inputs is not None:
+        #     good_input_idx = [i for (i, name) in enumerate(input_names) if name not in unused_inputs]
+        #     B_c = B_c[:, good_input_idx]
+        #     input_names = [name for name in input_names if name not in unused_inputs]
+
+        # initialize states based on matrices
+        
+        # Define states
+        self.nx = len(self.states)
+        # if isinstance(self.states, dict):
+        #     self.states = np.array(list(self.states.values()), dtype=float)
+        # else:
+        #     self.states = np.zeros(self.nx, dtype=float)
+
+        # Define inputs
+        self.nu = len(input_names)
+        # if isinstance(input_names, dict):
+        #     self.inputs = np.array(list(input_names.values()), dtype=float)
+        # else:
+        #     self.inputs = np.zeros(self.nu, dtype=float)
+        self.input_names = list(input_names)
+        self.use_schedule_for_inputs = all([col in self.input_names for col in self.schedule.columns])
+        self.inputs_init = self.inputs  # for saving values from update_inputs step
+        
+        # Define outputs
+        if outputs is None:
+            self.ny = self.nx
+            self.output_names = self.state_names.copy()
+        else:
+            self.ny = len(outputs)
+            self.output_names = outputs
+        # self.outputs = np.zeros(self.ny, dtype=float)
+        # self.next_outputs = self.outputs  # for saving outputs of next time step
+
+        # Define continuous-time matrices
+        self.A_c, self.B_c, self.C, self.D = self.create_matrices(matrices)
+
+        # Update output values
+        self.outputs = self.C.dot(self.states) + self.D.dot(self.inputs)
+
+        # Reduce model order (i.e. number of states)
+        self.reduced = False
+        self.transformation_matrix = None
+        if 'reduced_states' in kwargs or 'reduced_min_accuracy' in kwargs:
+            self.reduce_model(update_discrete=False, **kwargs)
+
+        # Create A, B discrete matrices
+        self.A, self.B = self.to_discrete()
+
+
+    def get_pcm_heat_xfer(self):
+        # if convection coefficient changes by phase, add heat transfer here
+
+
+        return np.array([0] * len(self.t_pcm_idx))
+
+        # # calculate heat transfer (pcm to water)
+        # t_water = self.states[self.t_pcm_wh_idx]
+        # t_pcm = self.states[self.t_pcm_idx]
+        # h_pcm = PCM_PROPERTIES["h_conv"] * (t_pcm - t_water)  # in W
+        # return h_pcml
+        return 0 # keep zero for now to prevent double counting pcm heat transfer
+
+    
+
+    def update_inputs(self, schedule_inputs=None):
+        # Note: self.inputs_init are not updated here, only self.current_schedule
+        super().update_inputs(schedule_inputs)
+        length = self.nu - len(self.inputs_init)
+        
+        zeros_array = np.zeros(length)
+        self.inputs_init = np.append(self.inputs_init, zeros_array)
+        
+
+        # get heat injections from PCM
+        # self.pcm_heat_to_water = self.get_pcm_heat_xfer()
+
+        # # # add PCM heat to inputs       
+        # self.inputs_init = np.append(self.inputs_init, -self.pcm_heat_to_water) # fix heat flow direction
+        # # # self.inputs_init[self.h_pcm_idx] = self.pcm_heat_to_water
+        # self.inputs_init[1:13] += self.pcm_heat_to_water # fix heat flow direction
+
+    # def update_model(self, control_signal=None):
+    #     super().update_model(control_signal)
+
+    #     # calculate new PCM enthalpy based on linear temperature change
+    #     delta_t = self.next_states[self.t_pcm_idx] - self.states[self.t_pcm_idx] 
+    #     q_pcm = delta_t * self.capacitances[self.t_pcm_idx] # J
+    #     self.pcm_heat_to_water_rc_network = -q_pcm/self.time_res.total_seconds()
+    #     self.enthalpy_pcm += q_pcm
+
+    #     # update PCM temperature in new_states
+    #     t_pcm = np.interp(self.enthalpy_pcm, self.key_enthalpy, self.key_temp)
+    #     self.next_states[self.t_pcm_idx] = t_pcm
+    #     self.update_state_space_model()
+        
+    def update_model(self, control_signal=None, epsilon=None, max_iter=None, iter_count=0,
+                    original_states=None, original_inputs=None, original_inputs_init=None):
+        # Use provided convergence criteria or fall back to instance attributes.
+        # if epsilon is None:
+        #     epsilon = self.epsilon
+        # if max_iter is None:
+        #     max_iter = self.max_iter
+
+        # # On the first call, store copies of the original states, inputs, and inputs_init.
+        # if original_states is None:
+        #     original_states = self.states.copy()
+        # if original_inputs is None:
+        #     original_inputs = self.inputs.copy()
+        # if original_inputs_init is None:
+        #     original_inputs_init = self.inputs_init.copy()
+
+        # Call the parent's update_model function.
+        super().update_model(control_signal)
+        
+        # Only use temperatures output from state space model and enthalpies nothing else
+        enthalpy_state = np.interp(self.states[self.t_pcm_idx], self.key_temp, self.key_enthalpy)
+        enthalpy_next_state = np.interp(self.next_states[self.t_pcm_idx], self.key_temp, self.key_enthalpy)
+        q_pcm = enthalpy_next_state - enthalpy_state
+        self.pcm_heat_to_water_rc_network = -q_pcm / self.time_res.total_seconds()
+        self.enthalpy_pcm = enthalpy_next_state
+        self.delta_enthalpy_pcm = enthalpy_next_state - enthalpy_state
+        
+
+        # Update the PCM temperature using interpolation from enthalpy to temperature.
+        # t_pcm = np.interp(self.enthalpy_pcm, self.key_enthalpy, self.key_temp)
+        # t_pcm = self.next_states[self.t_pcm_idx]
+        # self.next_states[self.t_pcm_idx] = t_pcm
+
+        # Call the state space model update (which may modify states, inputs, and inputs_init).
+        self.update_state_space_model()
+
+        # Reset the states and inputs to their original values so they stay constant between iterations.
+        # self.states = original_states.copy()
+        # self.inputs = original_inputs.copy()
+        # self.inputs_init = original_inputs_init.copy()
+
+        # # Check convergence: if the maximum change is smaller than epsilon or max iterations reached, stop.
+        # if np.max(np.abs(delta_t)) < epsilon or iter_count > max_iter:
+        #     self.step_num += 1
+        #     print(f"Convergence reached after {iter_count + 1} iterations: ΔT = {np.max(np.abs(delta_t)):.6f} [{self.step_num}/{self.sim_times.size}]")
+        #     return
+        # else:
+        #     # Update the current state for the next iteration.
+        #     self.states[self.t_pcm_idx] = t_pcm
+
+        #     # Recursively call update_model with the original copies maintained.
+        #     self.update_model(control_signal, epsilon, max_iter, iter_count + 1,
+        #                     original_states, original_inputs, original_inputs_init)
+        
+    def generate_results(self):
+        # Note: most results are included in Dwelling/WH. Only inputs and states are saved to self.results
+        results = super().generate_results()
+
+        if self.verbosity >= 6:
+            
+            for i, idx in enumerate(self.t_pcm_idx):
+                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} Temperature (C)"] = self.states[idx]
+                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} Water Temperature (C)"] = self.states[self.t_pcm_wh_idx[i]]
+                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} Enthalpy (J)"] = self.enthalpy_pcm[i]
+                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} Heat Injected (W)"] = self.pcm_heat_to_water_rc_network[i]
+                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} Capacitance (J/K)"] = self.capacitances[idx]
+                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} film_h (W/m^2K)"] = self.pcm_properties["film_h"]
+                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} PCM Thickness (in)"] = self.pcm_properties['external_pcm_thickness_in']
+                
+            results['Total PCM Enthalpy (J)'] = self.enthalpy_pcm.sum()
+            results['Delta Total PCM Enthalpy (J)'] = self.delta_enthalpy_pcm.sum()
+            results['Total PCM Heat Injected (W)'] = self.pcm_heat_to_water_rc_network.sum()
+            results['PCM Mass (kg)'] = self.pcm_mass_kg
+            results['Water Volume (L)'] = self.volume
+
+            
+        return results
+    
+    
