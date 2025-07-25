@@ -26,8 +26,8 @@ DEFAULT_PCM_PROPERTIES = {
     "setpoint_temp": 60,
     "solid": {
         "pcm_density": 0.904,  # g/cm**3
-        "pcm_cp": 1.20,  # J/g-C # adjusted by real measurements average from 0-45c
-        "pcm_conductivity":2.6,  # W/m-C, not used
+        "pcm_cp": 0.6,  # J/g-C # adjusted by real measurements average from 0-45c
+        "pcm_conductivity":10,  # W/m-C, not used
         # "pcm_c": 1717.6,  # J/m**3-C, not used
     },
     "liquid": {
@@ -603,6 +603,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         self.steel_k_value = steel_k_value
         self.steel_cp_value = steel_cp_value
         self.steel_density = steel_density
+        
 
         # ------------------------------------------------------------------
         # Pre‑load PCM enthalpy lookup table
@@ -614,6 +615,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         # Fallback for water‑side film‑coefficient
         self.water_side_film_h = self.pcm_properties.get('film_h')
         self.pcm_thickness_in = self.pcm_properties.get('external_pcm_thickness_in')
+        self.pcm_segment_thickness_inches = self.pcm_properties.get("pcm_segment_thickness_inches", 0.2)
         self.external_nodes = ['AMB']
 
         # ------------------------------------------------------------------
@@ -672,15 +674,13 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         # assert [self.state_names.index(f"T_WH{node}") for node in self.pcm_water_nodes] == self.t_pcm_wh_idx
         # self.h_pcm_wh_idx = [self.input_names.index(f"H_WH{node}") for node in self.pcm_water_nodes]
         
-        self.t_pcm_wh_idx = [x for x in range(1, len(self.state_names)+1) if f"T_WH{x}" in self.state_names]
+        self.t_pcm_wh_idx = [name for name in self.state_names if name.startswith("T_PCM")] 
         
         self.enthalpy_pcm: np.ndarray = np.interp(
             self.states[self.t_pcm_idx], self.key_temp, self.key_enthalpy_pcm * self.pcm_mass_kg*1e3
         )
 
         
-    
-
     def load_rc_data(self, **kwargs):
         include_axial = kwargs.get("include_axial_conduction", True)
         rc = super().load_rc_data(**kwargs)
@@ -721,6 +721,87 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         A_vert_pcm = 2*math.pi*r_mid_pcm* self.pcm_thickness_m
         A_vert_ins = 2*math.pi*r_mid_ins* self.insulation_thickness_m
 
+        # PCM layer thickness parameters (adjustable from 0.005" to 20")
+        pcm_in_max = 20
+        pcm_in_min = 0.005
+        if self.pcm_thickness_m/0.0254 < pcm_in_min:
+            print(f"Warning: PCM thickness {self.pcm_thickness_m/0.0254} inches is less than {pcm_in_min} inches. Clamping to {pcm_in_min} inches.")
+            pcm_thickness_inches = pcm_in_min
+        elif self.pcm_thickness_m/0.0254 > pcm_in_max:
+            print(f"Warning: PCM thickness {self.pcm_thickness_m/0.0254} is greater than {pcm_in_max} inches. Clamping to {pcm_in_max} inches.")
+            pcm_thickness_inches = 20
+        else:
+            pcm_thickness_inches = kwargs.get("pcm_thickness_inches", self.pcm_thickness_m / 0.0254)
+            pcm_thickness_inches = max(0.005, min(20.0, pcm_thickness_inches))  # Clamp to valid range
+        pcm_thickness_m = pcm_thickness_inches * 0.0254  # Convert to meters
+        
+        # Update radii with adjustable PCM thickness
+        r_pcm = r_st + pcm_thickness_m
+        r_ins = r_pcm + self.insulation_thickness_m
+        r_mid_pcm = r_st + 0.5 * pcm_thickness_m
+        r_mid_ins = r_pcm + 0.5 * self.insulation_thickness_m
+        
+        # Recalculate vertical areas with new PCM thickness
+        A_vert_pcm = 2*math.pi*r_mid_pcm * pcm_thickness_m
+        A_vert_ins = 2*math.pi*r_mid_ins * self.insulation_thickness_m
+        
+        # PCM segmentation parameters
+        pcm_segment_thickness_inches = self.pcm_segment_thickness_inches
+        pcm_segment_thickness_m = pcm_segment_thickness_inches * 0.0254  # inches to meters
+        
+        # Robust segmentation algorithm
+        def calculate_segments(total_dimension, target_segment_size, min_segments=1, max_segments=1000):
+            """Calculate optimal number of segments with robust bounds checking"""
+            if total_dimension <= 0:
+                return 1, total_dimension
+            
+            # Calculate ideal number of segments
+            n_segments_ideal = total_dimension / target_segment_size
+            
+            # Round to nearest integer, but enforce bounds
+            n_segments = max(min_segments, min(max_segments, round(n_segments_ideal)))
+            
+            # If we have very thin layers, ensure at least one segment
+            if n_segments < 1:
+                n_segments = 1
+            
+            # Calculate actual segment size
+            actual_segment_size = total_dimension / n_segments
+            
+            return n_segments, actual_segment_size
+        
+        # Calculate radial segments
+        n_pcm_radial, actual_pcm_segment_thickness = calculate_segments(
+            pcm_thickness_m, pcm_segment_thickness_m, min_segments=1, max_segments=200
+        )
+        
+        # Calculate circumferential segments
+        mid_circumference = 2 * math.pi * r_mid_pcm
+        n_pcm_circumferential, actual_circumferential_size = calculate_segments(
+            mid_circumference, pcm_segment_thickness_m, min_segments=1, max_segments=1
+        )
+        
+        # Calculate axial segments per layer
+        n_pcm_axial, actual_pcm_axial_thickness = calculate_segments(
+            L_layer, pcm_segment_thickness_m, min_segments=1, max_segments=1
+        )
+        
+        # Validation and warnings
+        total_pcm_segments = n_pcm_radial * n_pcm_circumferential * n_pcm_axial * n_nodes
+        max_recommended_segments = 50000  # Reasonable limit for computational efficiency
+        
+        if total_pcm_segments > max_recommended_segments:
+            print(f"Warning: Total PCM segments ({total_pcm_segments}) exceeds recommended limit ({max_recommended_segments})")
+            print(f"Consider increasing pcm_segment_thickness_inches (currently {pcm_segment_thickness_inches})")
+        
+        print(f"PCM Configuration:")
+        print(f"  - Thickness: {pcm_thickness_inches:.3f} inches ({pcm_thickness_m*1000:.1f} mm)")
+        print(f"  - Radial segments: {n_pcm_radial} (thickness: {actual_pcm_segment_thickness*1000:.2f} mm)")
+        print(f"  - Circumferential segments: {n_pcm_circumferential} (arc: {actual_circumferential_size*1000:.2f} mm)")
+        print(f"  - Axial segments per layer: {n_pcm_axial} (height: {actual_pcm_axial_thickness*1000:.2f} mm)")
+        print(f"  - Total PCM segments: {total_pcm_segments}")
+        print(f"  - Total PCM mass per layer: {total_pcm_segments/n_nodes * actual_pcm_segment_thickness * 1000:.1f} g")
+
         # helper: radial conduction
         def R_cond(k, r1, r2):
             return math.log(r2/r1) / (2*math.pi * k * L_layer)
@@ -734,17 +815,16 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         vol_st = math.pi * (r_st**2-r_en**2) * L_layer
         mass_st = rho_st * vol_st
         C_st = mass_st * c_st
-        # pcm
-        vol_pcm = math.pi*(r_pcm**2-r_st**2) * L_layer
-        mass_pcm = self.pcm_properties["solid"]["pcm_density"] * vol_pcm * 1e3 * 1e3 # make sure mass in g
-        cp_pcm = np.interp(start_T,
-                           self.pcm_properties["enthalpy_lut"][:,0],
-                           self.pcm_properties["enthalpy_lut"][:,1])
-        C_pcm = mass_pcm * cp_pcm
-        # insulation
+        # insulation (updated with new PCM thickness)
         vol_ins = math.pi * (r_ins**2-r_pcm**2) * L_layer
         mass_ins = rho_ins * vol_ins
         C_ins = mass_ins * c_ins
+
+        # PCM segment calculations (updated with adjustable thickness)
+        pcm_density = self.pcm_properties["solid"]["pcm_density"] * 1e3 * 1e3  # convert to g/m³
+        cp_pcm = np.interp(start_T,
+                           self.pcm_properties["enthalpy_lut"][:,0],
+                           self.pcm_properties["enthalpy_lut"][:,1])
 
         # initialize PCM mass dictionary
         self.pcm_mass_dict = {}
@@ -759,32 +839,229 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
             rc[f"R_ENM{i}_STL{i}"] = R_cond(k_en, r_w, r_en)
             # steel
             rc[f"C_STL{i}"]       = C_st
-            rc[f"R_STL{i}_PCM{i}"] = R_cond(k_st, r_en, r_st)
-            # PCM
-            rc[f"C_PCM{i}"]       = C_pcm
-            self.pcm_mass_dict[i]   = mass_pcm
-            self.pcm_mass_kg += mass_pcm * 1e-3
-            rc[f"R_PCM{i}_INS{i}"] = R_cond(k_pcm, r_st, r_pcm)
+            # Steel connects to innermost PCM segments
+            
+            # Create PCM segments for this layer
+            for r in range(1, n_pcm_radial+1):
+                r_inner = r_st + (r-1) * actual_pcm_segment_thickness
+                r_outer = r_st + r * actual_pcm_segment_thickness
+                r_mid = (r_inner + r_outer) / 2
+                
+                for c in range(1, n_pcm_circumferential+1):
+                    for a in range(1, n_pcm_axial+1):
+                        # Segment identifier
+                        seg_id = f"PCM{i}-{r}-{c}-{a}"
+                        
+                        # Calculate segment volume and mass (robust for all PCM thicknesses)
+                        theta_segment = 2 * math.pi / n_pcm_circumferential
+                        
+                        # Volume calculation for cylindrical segment
+                        radial_area = math.pi * (r_outer**2 - r_inner**2)
+                        circumferential_fraction = theta_segment / (2 * math.pi)
+                        vol_segment = radial_area * actual_pcm_axial_thickness * circumferential_fraction
+                        
+                        # Ensure minimum volume for very thin PCM layers
+                        min_vol = 1e-12  # 1 mm³ minimum
+                        vol_segment = max(vol_segment, min_vol)
+                        
+                        mass_segment = pcm_density * vol_segment
+                        
+                        # Capacitance
+                        rc[f"C_{seg_id}"] = mass_segment * cp_pcm
+                        
+                        if seg_id not in self.pcm_mass_dict:
+                            self.pcm_mass_dict[seg_id] = mass_segment
+                            self.pcm_mass_kg += mass_segment * 1e-3
+                        
+                        # Robust resistance calculations with bounds checking
+                        def safe_resistance(dr, area, k, min_r=1e-6, max_r=1e6):
+                            """Calculate resistance with bounds checking"""
+                            if area <= 0 or k <= 0:
+                                return max_r
+                            r = dr / (k * area)
+                            return max(min_r, min(max_r, r))
+                        
+                        # Radial conduction resistances
+                        dr = actual_pcm_segment_thickness
+                        A_radial = 2 * math.pi * r_mid * actual_pcm_axial_thickness * circumferential_fraction
+                        R_radial = safe_resistance(dr, A_radial, k_pcm)
+                        
+                        # Connect to steel (innermost radial layer)
+                        if r == 1:
+                            # Connect to steel
+                            rc[f"R_STL{i}_{seg_id}"] = R_radial / 2  # Half resistance to segment center
+                        else:
+                            # Connect to inner radial neighbor
+                            inner_seg_id = f"PCM{i}-{r-1}-{c}-{a}"
+                            rc[f"R_{inner_seg_id}_{seg_id}"] = R_radial
+                        
+                        # Connect to outer radial neighbor or insulation
+                        if r == n_pcm_radial:
+                            # Connect to insulation
+                            rc[f"R_{seg_id}_INS{i}"] = R_radial / 2  # Half resistance to segment center
+                        else:
+                            # Will be connected when outer segment is created
+                            pass
+                        
+                        # Circumferential conduction resistances
+                        dtheta = theta_segment
+                        A_circumferential = dr * actual_pcm_axial_thickness
+                        R_circumferential = safe_resistance(r_mid * dtheta, A_circumferential, k_pcm)
+                        
+                        # Connect to circumferential neighbors (wrap around)
+                        c_next = c + 1 if c < n_pcm_circumferential else 1
+                        c_prev = c - 1 if c > 1 else n_pcm_circumferential
+                        
+                        next_seg_id = f"PCM{i}-{r}-{c_next}-{a}"
+                        prev_seg_id = f"PCM{i}-{r}-{c_prev}-{a}"
+                        
+                        # Only create resistance to next segment to avoid duplicates
+                        if c < c_next or (c == n_pcm_circumferential and c_next == 1 and seg_id != next_seg_id):
+                            rc[f"R_{seg_id}_{next_seg_id}"] = R_circumferential
+                        
+                        # Axial conduction resistances
+                        dz = actual_pcm_axial_thickness
+                        A_axial = radial_area * circumferential_fraction
+                        R_axial_segment = safe_resistance(dz, A_axial, k_pcm)
+                        
+                        # Connect to axial neighbors within the same layer
+                        if a < n_pcm_axial:
+                            next_axial_seg_id = f"PCM{i}-{r}-{c}-{a+1}"
+                            rc[f"R_{seg_id}_{next_axial_seg_id}"] = R_axial_segment
+                        
+                        # Connect to adjacent layers (if axial conduction enabled)
+                        if include_axial and i < n_nodes:
+                            # Connect to corresponding segment in next layer
+                            next_layer_seg_id = f"PCM{i+1}-{r}-{c}-{a}"
+                            # Use robust resistance calculation
+                            R_layer_axial = safe_resistance(dz, A_axial, k_pcm)
+                            rc[f"R_{seg_id}_{next_layer_seg_id}"] = R_layer_axial
+
             # insulation
             rc[f"C_INS{i}"]       = C_ins
             R_ins_r = R_cond(k_ins, r_pcm, r_ins)
             A_out = 2*math.pi*r_ins*L_layer + 2*math.pi*r_ins**2/n_nodes
             rc[f"R_INS{i}_AMB"]   = R_ins_r + 1.0/(h_ext * A_out)
 
-            # axial conduction
+            # axial conduction for non-PCM layers
             if include_axial and i < n_nodes:
                 ni = i + 1
                 rc[f"R_ENM{i}_ENM{ni}"] = L_layer / (k_en  * A_vert_en)
                 rc[f"R_STL{i}_STL{ni}"] = L_layer / (k_st  * A_vert_st)
-                rc[f"R_PCM{i}_PCM{ni}"] = L_layer / (k_pcm * A_vert_pcm)
                 rc[f"R_INS{i}_INS{ni}"] = L_layer / (k_ins * A_vert_ins)
 
         # remove original water->amb resistances
         for i in range(1, n_nodes+1):
             rc.pop(f"R_WH{i}_AMB", None)
-
         self.rc_params = rc
         return rc
+    
+    
+
+    # def load_rc_data(self, **kwargs):
+    #     include_axial = kwargs.get("include_axial_conduction", True)
+    #     rc = super().load_rc_data(**kwargs)
+
+    #     n_nodes = len(self.vol_fractions)
+    #     A_layer = self.internal_area_m2 / n_nodes
+    #     L_layer = self.tank_height_m / n_nodes
+    #     start_T = kwargs.get("Setpoint Temperature (C)", 51.6666667)
+
+    #     # material props
+    #     rho_en = kwargs.get("rho_enamel", self.enamel_density)
+    #     c_en   = kwargs.get("c_enamel",   self.enamel_cp_value)
+    #     rho_st = kwargs.get("rho_steel",  self.steel_density)
+    #     c_st   = kwargs.get("c_steel",    self.steel_cp_value)
+    #     rho_ins= kwargs.get("rho_ins",    self.insulation_density)
+    #     c_ins  = kwargs.get("c_ins",      self.insulation_cp_value)
+    #     k_en   = kwargs.get("k_enamel",   self.enamel_k_value)
+    #     k_st   = kwargs.get("k_steel",    self.steel_k_value)
+    #     k_pcm  = self.pcm_properties["solid"]["pcm_conductivity"]
+    #     k_ins  = kwargs.get("insulation_k_value", self.insulation_k_value)
+    #     h_ext  = kwargs.get("h_ext",       8.0)
+
+    #     # radii for layers
+    #     r_w   = self.tank_radius_m
+    #     r_en  = r_w + self.enamel_thickness_m
+    #     r_st  = r_en + self.steel_wall_thickness_m
+    #     r_pcm = r_st + self.pcm_thickness_m
+    #     r_ins = r_pcm + self.insulation_thickness_m
+
+    #     # mid radii for axial conduction areas
+    #     r_mid_en  = r_w + 0.5*self.enamel_thickness_m
+    #     r_mid_st  = r_en + 0.5*self.steel_wall_thickness_m
+    #     r_mid_pcm = r_st + 0.5*self.pcm_thickness_m
+    #     r_mid_ins = r_pcm + 0.5*self.insulation_thickness_m
+
+    #     A_vert_en  = 2*math.pi*r_mid_en * self.enamel_thickness_m
+    #     A_vert_st  = 2*math.pi*r_mid_st * self.steel_wall_thickness_m
+    #     A_vert_pcm = 2*math.pi*r_mid_pcm* self.pcm_thickness_m
+    #     A_vert_ins = 2*math.pi*r_mid_ins* self.insulation_thickness_m
+
+    #     # helper: radial conduction
+    #     def R_cond(k, r1, r2):
+    #         return math.log(r2/r1) / (2*math.pi * k * L_layer)
+
+    #     # compute capacitances & masses per layer
+    #     # enamel
+    #     vol_en = math.pi * (r_en**2-r_w**2) * L_layer
+    #     mass_en = rho_en * vol_en
+    #     C_en = mass_en * c_en
+    #     # steel
+    #     vol_st = math.pi * (r_st**2-r_en**2) * L_layer
+    #     mass_st = rho_st * vol_st
+    #     C_st = mass_st * c_st
+    #     # pcm
+    #     vol_pcm = math.pi*(r_pcm**2-r_st**2) * L_layer
+    #     mass_pcm = self.pcm_properties["solid"]["pcm_density"] * vol_pcm * 1e3 * 1e3 # make sure mass in g
+    #     cp_pcm = np.interp(start_T,
+    #                        self.pcm_properties["enthalpy_lut"][:,0],
+    #                        self.pcm_properties["enthalpy_lut"][:,1])
+    #     C_pcm = mass_pcm * cp_pcm
+    #     # insulation
+    #     vol_ins = math.pi * (r_ins**2-r_pcm**2) * L_layer
+    #     mass_ins = rho_ins * vol_ins
+    #     C_ins = mass_ins * c_ins
+
+    #     # initialize PCM mass dictionary
+    #     self.pcm_mass_dict = {}
+    #     self.pcm_mass_kg = 0
+
+    #     # build RC network per stratum
+    #     for i in range(1, n_nodes+1):
+    #         # water -> enamel convective
+    #         rc[f"R_WH{i}_ENM{i}"] = 1.0 / (self.water_side_film_h * A_layer)
+    #         # enamel
+    #         rc[f"C_ENM{i}"]      = C_en
+    #         rc[f"R_ENM{i}_STL{i}"] = R_cond(k_en, r_w, r_en)
+    #         # steel
+    #         rc[f"C_STL{i}"]       = C_st
+    #         rc[f"R_STL{i}_PCM{i}"] = R_cond(k_st, r_en, r_st)
+    #         # PCM
+    #         rc[f"C_PCM{i}"]       = C_pcm
+    #         self.pcm_mass_dict[i]   = mass_pcm
+    #         self.pcm_mass_kg += mass_pcm * 1e-3
+    #         rc[f"R_PCM{i}_INS{i}"] = R_cond(k_pcm, r_st, r_pcm)
+    #         # insulation
+    #         rc[f"C_INS{i}"]       = C_ins
+    #         R_ins_r = R_cond(k_ins, r_pcm, r_ins)
+    #         A_out = 2*math.pi*r_ins*L_layer + 2*math.pi*r_ins**2/n_nodes
+    #         rc[f"R_INS{i}_AMB"]   = R_ins_r + 1.0/(h_ext * A_out)
+
+    #         # axial conduction
+    #         if include_axial and i < n_nodes:
+    #             ni = i + 1
+    #             rc[f"R_ENM{i}_ENM{ni}"] = L_layer / (k_en  * A_vert_en)
+    #             rc[f"R_STL{i}_STL{ni}"] = L_layer / (k_st  * A_vert_st)
+    #             rc[f"R_PCM{i}_PCM{ni}"] = L_layer / (k_pcm * A_vert_pcm)
+    #             rc[f"R_INS{i}_INS{ni}"] = L_layer / (k_ins * A_vert_ins)
+
+    #     # remove original water->amb resistances
+    #     for i in range(1, n_nodes+1):
+    #         rc.pop(f"R_WH{i}_AMB", None)
+
+    #     self.rc_params = rc
+    #     return rc
     
     def update_rc_network(self, t_pcm, **kwargs):
         '''Get the dynamic specific heat for each of the pcm nodes and update the capacitance in the rc_network'''
@@ -801,7 +1078,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
 
             
             # Update the capacitance for this node (in J/K)
-            self.rc_params[f"C_PCM{index}"] = pcm_specific_heat * pcm_node_mass
+            self.rc_params[f"C_{index}"] = pcm_specific_heat * pcm_node_mass
             # self.rc_params[f"C_PCM{node}"] = 1e-3
         return self.rc_params
         
@@ -991,13 +1268,11 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         if self.verbosity >= 6:
             
             for i, idx in enumerate(self.t_pcm_idx):
-                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} Temperature (C)"] = self.states[idx]
-                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} Water Temperature (C)"] = self.states[self.t_pcm_wh_idx[i]]
-                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} Enthalpy (J)"] = self.enthalpy_pcm[i]
-                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} Heat Injected (W)"] = self.pcm_heat_to_water_rc_network[i]
-                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} Capacitance (J/K)"] = self.capacitances[idx]
-                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} film_h (W/m^2K)"] = self.pcm_properties["film_h"]
-                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]} PCM Thickness (in)"] = self.pcm_properties['external_pcm_thickness_in']
+                results[f"Water Tank {self.state_names[idx]} Temperature (C)"] = self.states[idx]
+                results[f"Water Tank {self.state_names[idx]} Water Temperature (C)"] = self.states[idx]
+                results[f"Water Tank {self.state_names[idx]} Enthalpy (J)"] = self.enthalpy_pcm[i]
+                results[f"Water Tank {self.state_names[idx]} Heat Injected (W)"] = self.pcm_heat_to_water_rc_network[i]
+                results[f"Water Tank {self.state_names[idx]} Capacitance (J/K)"] = self.capacitances[idx]
                 
             results['Total PCM Enthalpy (J)'] = self.enthalpy_pcm.sum()
             results['Delta Total PCM Enthalpy (J)'] = self.delta_enthalpy_pcm.sum()

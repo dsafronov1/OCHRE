@@ -42,8 +42,9 @@ DEFAULT_PCM_PROPERTIES = {
     "setpoint_temp": 50,  # C
     "solid": {
         "pcm_density": 0.991,  # g/cm**3 10% graphite 90% pcm
-        "pcm_cp": 1.20,  # J/g-C # adjusted by real measurements average from 0-45c
-        "pcm_conductivity": 0.28,  # W/m-C, not used
+        "pcm_cp": 0.6,  # J/g-C # adjusted by real measurements average from 0-45c
+        # "pcm_conductivity": 0.28,  # W/m-C, not used Bulk PCM conductivity
+        "pcm_conductivity": 10,  # W/m-C, not used graphite infiltrated PCM conductivity
         # "pcm_c": 1717.6,  # J/m**3-C, not used
     },
     "liquid": {
@@ -54,7 +55,8 @@ DEFAULT_PCM_PROPERTIES = {
     },
     "enthalpy_lut": "90-cp_h-T_data_shifted_120F.csv",
     "film_h": 50,
-    "external_pcm_thickness_in": 0.5
+    "external_pcm_thickness_in": 0.5,
+    "pcm_segment_thickness_inches": 0.2
 }
 
 num_points = 10
@@ -65,13 +67,8 @@ h_values = [5000]
 # h_values = np.logspace(np.log10(50), np.log10(5000), num_points)
 
 
-pcm_file_names = [
-    "cp_h-T_data_shifted_120F.csv",
-    "cp_h-T_data_shifted_125F.csv",
-    "cp_h-T_data_shifted_130F.csv",
-    "cp_h-T_data_shifted_135F.csv",
-    "cp_h-T_data_shifted_140F.csv",
-]
+# pcm_file_names = [f"90%_cp_h-T_data_shifted_{i}F.csv" for i in range(110, 142, 2)]
+
 
 simulation_duration_days = 220
 
@@ -86,11 +83,13 @@ setpoint_temps_c = [
 
 # films_h = np.linspace(50, 1000, 11)
 # logarithmic range spacing
-films_h = np.logspace(np.log10(50), np.log10(1000), 11)
-pcms_thickness_in = np.linspace(0.1, 1.25, 11)
+# films_h = np.logspace(np.log10(50), np.log10(1000), 11)
+# pcms_thickness_in = np.linspace(0.1, 1.25, 11)
 
-# films_h = [50]
-# pcms_thickness_in = [0.5, 1]
+films_h = [150, 1000]
+pcms_thickness_in = [1.2]
+pcms_segment_thickness_inches = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+
 
 # tank_volume_gal = [40,50, 65]
 tank_volume_gal = [40]
@@ -741,11 +740,23 @@ def move_results(results_folder, graphings_results_folder, num_files_to_move):
         shutil.rmtree(graphings_results_folder)
     os.mkdir(graphings_results_folder)
 
-    # Move each selected file.
+    # Move each selected file, pausing if it's in use.
     for file in files_to_move:
         source = os.path.join(results_folder, file)
-        destination = os.path.join(graphings_results_folder, file)
-        os.rename(source, destination)
+        dest   = os.path.join(graphings_results_folder, file)
+        while True:
+            try:
+                os.rename(source, dest)
+                break
+            except PermissionError:
+                print(f"Waiting on file '{file}' to be released. Close it and press Enter to retry...")
+                input()
+            except Exception as e:
+                # any other error, bail out
+                print(f"Error moving '{file}': {e}")
+                raise
+
+
 
 
 def run_water_heater_process(
@@ -862,83 +873,85 @@ if __name__ == "__main__":
                             for h_value in h_values:
                                 for film_h in films_h:
                                     for external_pcm_thickness_in in pcms_thickness_in:
-                                        # electric water heater
-                                        # Create fresh copy of default args for each simulation
-                                        # current_default_args = copy.deepcopy(default_args_default)
-                                        # current_pcm_properties = copy.deepcopy(DEFAULT_PCM_PROPERTIES)
-                                        # current_pcm_properties['setpoint_temp'] = setpoint_temp_c
-                                        # current_pcm_properties["sa_ratio"] = sa_ratio
-                                        # current_pcm_properties["h"] = h_value
-                                        # current_pcm_properties['enthalpy_lut'] = pcm_file_name
+                                        for pcm_segment_thickness_inches in pcms_segment_thickness_inches:
+                                            # electric water heater
+                                            # Create fresh copy of default args for each simulation
+                                            # current_default_args = copy.deepcopy(default_args_default)
+                                            # current_pcm_properties = copy.deepcopy(DEFAULT_PCM_PROPERTIES)
+                                            # current_pcm_properties['setpoint_temp'] = setpoint_temp_c
+                                            # current_pcm_properties["sa_ratio"] = sa_ratio
+                                            # current_pcm_properties["h"] = h_value
+                                            # current_pcm_properties['enthalpy_lut'] = pcm_file_name
 
-                                        # # Add PCM model with specific volume fraction
-                                        # model_name = convert_dict_to_name(pcm_vol_fraction)
+                                            # # Add PCM model with specific volume fraction
+                                            # model_name = convert_dict_to_name(pcm_vol_fraction)
 
-                                        # model_name = f"{model_name}_Electric_SA-{sa_ratio:.2f}_H-{h_value:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
-                                        # i += 1
-                                        # current_default_args = add_pcm_model(
-                                        #     current_default_args,
-                                        #     model_name,
-                                        #     pcm_vol_fraction,
-                                        #     current_pcm_properties,
-                                        # )
+                                            # model_name = f"{model_name}_Electric_SA-{sa_ratio:.2f}_H-{h_value:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
+                                            # i += 1
+                                            # current_default_args = add_pcm_model(
+                                            #     current_default_args,
+                                            #     model_name,
+                                            #     pcm_vol_fraction,
+                                            #     current_pcm_properties,
+                                            # )
 
-                                        # # Record submission time for this task
-                                        # submission_time = time.perf_counter()
-                                        # async_result = pool.apply_async(
-                                        #     run_water_heater_process,
-                                        #     (
-                                        #         current_default_args,
-                                        #         tank_volume,
-                                        #         setpoint_temp_c,
-                                        #         model_name,
-                                        #         submission_time,
-                                        #     ),
-                                        # )
-                                        # async_results.append(async_result)
-                                        # print(
-                                        #     f"{YELLOW}Submitted {model_name} simulation to queue{RESET}"
-                                        # )
-                                        # heat pump water heater
-                                        # Create fresh copy of default args for each simulation
-                                        current_default_args = copy.deepcopy(default_args_default)
-                                        current_default_args['is_heatpump'] = True
-                                        current_pcm_properties = copy.deepcopy(DEFAULT_PCM_PROPERTIES)
-                                        current_pcm_properties['setpoint_temp'] = setpoint_temp_c
-                                        current_pcm_properties["sa_ratio"] = sa_ratio
-                                        current_pcm_properties["h"] = h_value
-                                        current_pcm_properties['enthalpy_lut'] = pcm_file_name
-                                        current_pcm_properties['film_h'] = film_h
-                                        current_pcm_properties['external_pcm_thickness_in'] = external_pcm_thickness_in
+                                            # # Record submission time for this task
+                                            # submission_time = time.perf_counter()
+                                            # async_result = pool.apply_async(
+                                            #     run_water_heater_process,
+                                            #     (
+                                            #         current_default_args,
+                                            #         tank_volume,
+                                            #         setpoint_temp_c,
+                                            #         model_name,
+                                            #         submission_time,
+                                            #     ),
+                                            # )
+                                            # async_results.append(async_result)
+                                            # print(
+                                            #     f"{YELLOW}Submitted {model_name} simulation to queue{RESET}"
+                                            # )
+                                            # heat pump water heater
+                                            # Create fresh copy of default args for each simulation
+                                            current_default_args = copy.deepcopy(default_args_default)
+                                            current_default_args['is_heatpump'] = True
+                                            current_pcm_properties = copy.deepcopy(DEFAULT_PCM_PROPERTIES)
+                                            current_pcm_properties['setpoint_temp'] = setpoint_temp_c
+                                            current_pcm_properties["sa_ratio"] = sa_ratio
+                                            current_pcm_properties["h"] = h_value
+                                            current_pcm_properties['enthalpy_lut'] = pcm_file_name
+                                            current_pcm_properties['film_h'] = film_h
+                                            current_pcm_properties['external_pcm_thickness_in'] = external_pcm_thickness_in
+                                            current_pcm_properties['pcm_segment_thickness_inches'] = pcm_segment_thickness_inches
 
-                                        # Add PCM model with specific volume fraction
-                                        model_name = convert_dict_to_name(pcm_vol_fraction)
+                                            # Add PCM model with specific volume fraction
+                                            model_name = convert_dict_to_name(pcm_vol_fraction)
 
-                                        model_name = f"Heatpump_thickness-{external_pcm_thickness_in:.2f}_water_side_film_h-{film_h:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
-                                        i += 1
-                                        current_default_args = add_pcm_model(
-                                            current_default_args,
-                                            model_name,
-                                            pcm_vol_fraction,
-                                            current_pcm_properties,
-                                        )
-
-                                        # Record submission time for this task
-                                        submission_time = time.perf_counter()
-                                        async_result = pool.apply_async(
-                                            run_water_heater_process,
-                                            (
+                                            model_name = f"Heatpump_thickness-{external_pcm_thickness_in:.2f}_segment_thickness-{pcm_segment_thickness_inches:.2f}_water_side_film_h-{film_h:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
+                                            i += 1
+                                            current_default_args = add_pcm_model(
                                                 current_default_args,
-                                                tank_volume,
-                                                setpoint_temp_c,
                                                 model_name,
-                                                submission_time,
-                                            ),
-                                        )
-                                        async_results.append(async_result)
-                                        print(
-                                            f"{YELLOW}Submitted {model_name} simulation to queue{RESET}"
-                                        )
+                                                pcm_vol_fraction,
+                                                current_pcm_properties,
+                                            )
+
+                                            # Record submission time for this task
+                                            submission_time = time.perf_counter()
+                                            async_result = pool.apply_async(
+                                                run_water_heater_process,
+                                                (
+                                                    current_default_args,
+                                                    tank_volume,
+                                                    setpoint_temp_c,
+                                                    model_name,
+                                                    submission_time,
+                                                ),
+                                            )
+                                            async_results.append(async_result)
+                                            print(
+                                                f"{YELLOW}Submitted {model_name} simulation to queue{RESET}"
+                                            )
 
         # Collect results from all simulations with improved error handling
         for async_result in async_results:

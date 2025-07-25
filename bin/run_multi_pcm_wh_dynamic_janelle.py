@@ -63,18 +63,13 @@ h_values = [5000]
 # h_values = np.logspace(np.log10(50), np.log10(5000), num_points)
 
 
-pcm_file_names = [
-    "cp_h-T_data_shifted_120F.csv",
-    "cp_h-T_data_shifted_125F.csv",
-    "cp_h-T_data_shifted_130F.csv",
-    "cp_h-T_data_shifted_135F.csv",
-    "cp_h-T_data_shifted_140F.csv",
-]
+pcm_file_names = [f"cp_h-T_data_shifted_{i}F.csv" for i in range(110, 142, 2)]
+
 
 simulation_duration_days = 220
 
 # pcm_file_names = ['cp_h-T_data_shifted_120F.csv']
-pcm_file_names = ['60-40_PCM55-TPU_cp-h-T_data_shifted_120F.csv']
+# pcm_file_names = ['60-40_PCM55-TPU_cp-h-T_data_shifted_120F.csv']
 
 setpoint_temps_f = [125]
 # setpoint_temps_f = [125, 140]

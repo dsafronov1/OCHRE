@@ -14,6 +14,8 @@ import numpy as np
 import colorsys
 from concurrent.futures import ThreadPoolExecutor
 
+from calculate_hot_water_delivered import calculate_hot_water_delivered
+
 
 L_TO_GAL_RATIO = 0.264172
 
@@ -312,72 +314,117 @@ def plot_draw_event_summary(draw_outputs, plot_energy=False):
     fig.show() 
     
     
+    
 def plot_draw_events(draw_outputs):
     """
-    For each file, create a separate grouped bar chart for the individual draw events.
-    Each event is compared by its water volume (gal) and heat delivered (kWh).
+    For each file, create grouped bar charts of draw events.
+    zDefault files get black bars; all others use the default color cycle.
     """
-    # Determine the maximum number of draw events among all files.
-    max_events = max(len(metrics['draw_events']) for metrics in draw_outputs.values())
+    # Find max number of events and labels
+    max_events = max(len(m['draw_events']) for m in draw_outputs.values())
     event_numbers = [f"Event {i+1}" for i in range(max_events)]
-    
-    # Build data dictionaries for water volume and heat delivered per file
-    water_data = {}  # key: file, value: list of water volumes per event (or None if missing)
-    heat_data = {}   # key: file, value: list of heat delivered per event (or None if missing)
-    
-    for file, metrics in draw_outputs.items():
-        events = metrics['draw_events']
-        water_values = []
-        heat_values = []
-        for i in range(max_events):
-            if i < len(events):
-                water_values.append(round(events[i]['water_volume_gal'], 2))
-                heat_values.append(round(events[i]['heat_delivered_kWh'], 3))
-            else:
-                water_values.append(None)
-                heat_values.append(None)
-        water_data[file] = water_values
-        heat_data[file] = heat_values
 
-    # Create subplots: 1 row, 2 columns for the two metrics
-    fig = make_subplots(rows=2, cols=1, 
-                        subplot_titles=("Water Volume (gal)", "Heat Delivered (kWh)"),
-                        shared_xaxes=True)
-    
-    # For each file, add a bar trace for water volume in subplot 1
-    for file, values in water_data.items():
-        fig.add_trace(
-            go.Bar(
-                name=file,
+    # Prepare water and heat data
+    water_data = {}
+    heat_data = {}
+    for fname, metrics in draw_outputs.items():
+        vols, heats = [], []
+        for i in range(max_events):
+            if i < len(metrics['draw_events']):
+                e = metrics['draw_events'][i]
+                vols.append(round(e['water_volume_gal'], 2))
+                heats.append(round(e['heat_delivered_kWh'], 3))
+            else:
+                vols.append(None)
+                heats.append(None)
+        water_data[fname] = vols
+        heat_data[fname] = heats
+
+    # Create subplots
+    fig = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=("Water Volume (gal)", "Heat Delivered (kWh)"),
+        shared_xaxes=True
+    )
+
+    # Add traces, only zDefault gets marker_color='black'
+    for row, data_dict, fmt in [
+        (1, water_data, "{:.2f}"),
+        (2, heat_data, "{:.3f}")
+    ]:
+        for fname, vals in data_dict.items():
+            params = dict(
+                name=fname,
                 x=event_numbers,
-                y=values,
-                text=[f"{v:.2f}" if v is not None else "" for v in values],
+                y=vals,
+                text=[fmt.format(v) if v is not None else "" for v in vals],
                 textposition='auto'
-            ),
-            row=1, col=1
-        )
-        
-    # For each file, add a bar trace for heat delivered in subplot 2
-    for file, values in heat_data.items():
-        fig.add_trace(
-            go.Bar(
-                name=file,
-                x=event_numbers,
-                y=values,
-                text=[f"{v:.3f}" if v is not None else "" for v in values],
-                textposition='auto'
-            ),
-            row=2, col=1
-        )
-    
-    # Update the layout for grouped bars and overall titles
+            )
+            if "zDefault" in fname:
+                params["marker_color"] = "black"
+            fig.add_trace(go.Bar(**params), row=row, col=1)
+
     fig.update_layout(
         barmode='group',
         title_text="Draw Events Grouped by Event Number Across Files",
         xaxis_title="Draw Event"
     )
-    
     fig.show()
+
+
+def plot_totals(draw_outputs):
+    """
+    For each file, plot:
+      • Total Water Volume (gal)
+      • Total Heat Delivered (kWh)
+    zDefault files get black bars; all others use the default color cycle.
+    """
+    # extract filenames and metrics
+    files = list(draw_outputs.keys())
+    water_totals = [round(m['total_water_volume_gal'], 2) for m in draw_outputs.values()]
+    heat_totals  = [round(m['total_heat_delivered_kWh'], 3) for m in draw_outputs.values()]
+
+    # set up two-row subplot
+    fig = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=("Total Water Volume (gal)", "Total Heat Delivered (kWh)"),
+        shared_xaxes=True
+    )
+
+    # row 1: water
+    for fname, val in zip(files, water_totals):
+        params = dict(
+            name=fname,
+            x=[fname],
+            y=[val],
+            text=[f"{val:.2f}"],
+            textposition='auto'
+        )
+        if "zDefault" in fname:
+            params["marker_color"] = "black"
+        fig.add_trace(go.Bar(**params), row=1, col=1)
+
+    # row 2: heat
+    for fname, val in zip(files, heat_totals):
+        params = dict(
+            name=fname,
+            x=[fname],
+            y=[val],
+            text=[f"{val:.3f}"],
+            textposition='auto'
+        )
+        if "zDefault" in fname:
+            params["marker_color"] = "black"
+        fig.add_trace(go.Bar(**params), row=2, col=1)
+
+    # layout tweaks
+    fig.update_layout(
+        barmode='group',
+        title_text="Total Metrics by File",
+    )
+    fig.update_xaxes(showticklabels=False)
+    fig.show()
+
 
 
 def plot_comparison(dfs, draw_outputs):
@@ -583,208 +630,248 @@ def plot_comparison(dfs, draw_outputs):
 def c_to_f(c):
     return c * 9/5 + 32
 
-def process_single_df_hot_water_delivered(file_key, df, first_hour_test=False):
+def process_single_df_hot_water_delivered(df, first_hour_test=False):
     """
-    Process a single dataframe to calculate hot water delivered metrics.
-    This is a worker function for parallel processing.
+    Calculate the total hot water delivered (W) and gallons for each file,
+    capturing individual draw events with their time ranges and metrics.
     
-    Parameters:
-    -----------
-    file_key : str
-        Key/identifier for the dataframe
-    df : DataFrame
-        Single dataframe with time series data
-    first_hour_test : bool
-        Flag for applying first hour test logic
-        
-    Returns:
-    --------
-    tuple: (file_key, output_dict) with metrics for this dataframe
+    A draw event is defined as any continuous period where water is being drawn (water_draw > 0).
+    However, water volume and heat energy are only added when the outlet temperature is >= cutoff.
+    
+    If first_hour_test=True, samples all outlet temps during each draw and applies the
+    “final draw” adjustment per the first-hour test procedure.
     """
-    water_draw_col = "Hot Water Delivered (L/min)"
-    water_output_W_col = "Hot Water Delivered (W)"
-    water_outlet_temp = "Hot Water Outlet Temperature (C)"
-    energy_used = "Water Heating Delivered (W)"
+    water_draw_col       = "Hot Water Delivered (L/min)"
+    water_output_W_col   = "Hot Water Delivered (W)"
+    water_outlet_temp    = "Hot Water Outlet Temperature (C)"
+    energy_used_col      = "Water Heating Delivered (W)"
     
-    water_temp_cutoff = 43.3333  # 110 F, 15 deg delta from 125 F for UEF test
-    L_TO_GAL_RATIO = 0.264172  # Liters to gallons conversion ratio
+    water_temp_cutoff    =  43.333  # 110°F in °C
+    L_TO_GAL_RATIO       = 0.264172    # liters → gallons
     
-    # Create a copy of the dataframe to avoid modifying the original
-    df_copy = df.copy()
+    output = {}
     
-    # Initialize variables to track water draw events and totals
-    max_water_volume_L = 180  # This is maximum possible, regardless of temp
-    total_water_volume_L = 0
-    total_heat_delivered_J = 0
-    is_draw_active = False
-    
-    # To track individual draw events
-    draw_events = []
-    current_event = None
-    
-    # Calculate time delta using the "Time" column
-    df_copy = df.copy()
-    if not pd.api.types.is_numeric_dtype(df_copy.index):
-        if pd.api.types.is_datetime64_any_dtype(df_copy.index):
-            df_copy['time_delta'] = df_copy.index.to_series().diff().dt.total_seconds()
-        else:
-            df_copy['time_delta'] = pd.to_numeric(df_copy.index.to_series().diff(), errors='coerce')
-    else:
-        df_copy['time_delta'] = df_copy.index.to_series().diff()
-
-    df_copy.fillna({'time_delta': 0}, inplace=True)
-    
-    for i, row in df_copy.iterrows():
-        water_draw = row[water_draw_col]
-        outlet_temp = row[water_outlet_temp]
-        heat_output = row[water_output_W_col]
-        time_delta = row['time_delta']
-        current_time = i  # "Time" index value
-        
-        if water_draw > 0:
-            # Start a new event if one is not active
-            if not is_draw_active:
-                is_draw_active = True
-                current_event = {
-                    'start_time': current_time,
-                    'end_time': None,
-                    'water_volume_L': 0,  # Only accumulate if outlet_temp >= cutoff
-                    'heat_delivered_J': 0,
-                    'max_temp': outlet_temp,
-                    'min_temp': outlet_temp,
-                    'max_flow_rate': water_draw,
-                    'temp_readings': [] if first_hour_test else None,  # For tracking temperature samples
-                }
-            # Update event regardless of temperature
-            current_event['end_time'] = current_time
-            current_event['max_flow_rate'] = max(current_event['max_flow_rate'], water_draw)
-            current_event['max_temp'] = max(current_event['max_temp'], outlet_temp)
-            current_event['min_temp'] = min(current_event['min_temp'], outlet_temp)
+    for file_key, df in dfs.items():
+        try:
+            df_copy = df.copy()
             
-            # Track all temperature readings if first_hour_test is enabled
-            if first_hour_test:
-                current_event['temp_readings'].append(outlet_temp)
+            # --- prepare ---
+            # use fixed max for first‐hour test consistency (as in process_single_df)
+            max_water_volume_L   = 180  
+            total_water_volume_L = 0
+            total_heat_delivered_J = 0
+            is_draw_active       = False
             
-            # Only accumulate water and heat if the outlet temperature is high enough.
-            if outlet_temp >= water_temp_cutoff:
-                water_volume = 3 / L_TO_GAL_RATIO /120  # (L/min * s) gives liters
-                heat_energy = heat_output / 120    # (W * s) gives Joules
-                total_water_volume_L += water_volume
-                total_heat_delivered_J += heat_energy
-                
-                current_event['water_volume_L'] += water_volume
-                current_event['heat_delivered_J'] += heat_energy
-                
-        elif is_draw_active:
-            # Water draw dropped to 0: close the active event if it has any hot water delivered.
-            if current_event and current_event['water_volume_L'] > 0:
-                current_event['water_volume_gal'] = current_event['water_volume_L'] * L_TO_GAL_RATIO
-                current_event['heat_delivered_kWh'] = current_event['heat_delivered_J'] * 2.77778e-7
-                
-                # Calculate average temperature if first_hour_test is enabled
-                if first_hour_test and current_event['temp_readings']:
-                    current_event['avg_temp'] = sum(current_event['temp_readings']) / len(current_event['temp_readings'])
-                
-                draw_events.append(current_event)
-            is_draw_active = False
+            draw_events = []
             current_event = None
-    
-    # If the last draw event is still active, close it out.
-    if is_draw_active and current_event and current_event['water_volume_L'] > 0:
-        current_event['water_volume_gal'] = current_event['water_volume_L'] * L_TO_GAL_RATIO
-        current_event['heat_delivered_kWh'] = current_event['heat_delivered_J'] * 2.77778e-7
+            # start as false
+            is_pcm = False
+            
+            # compute time deltas (in seconds)
+            df_copy.index = pd.to_datetime(df_copy['Time'])
+            df_copy['time_delta'] = (
+                                    pd.to_datetime(df_copy.index).to_series()
+                                    .diff()
+                                    .dt.total_seconds()
+                                    .fillna(0)
+                                    )
+            
+            pcm_columns = [col for col in df_copy.columns if col.startswith('T_PCM')]
+            if len(pcm_columns) > 0:
+                is_pcm = True
+                pcm_enthalpy_column = 'Total PCM Enthalpy (J)'
+                starting_pcm_enthalpy = df_copy[pcm_enthalpy_column].iloc[0]
+                
+                # find the first instance of pcm temp lower than cutoff_temp
+                df_copy['average_pcm_temp'] = df_copy[pcm_columns].mean(axis=1)
+                df_copy['is_cutoff_temp'] = df_copy['average_pcm_temp'] < water_temp_cutoff
+                try:
+                    cutoff_index = df_copy[df_copy['is_cutoff_temp']].index[0]
+                    baseline_enthalpy = df_copy[pcm_enthalpy_column][cutoff_index]
+                except Exception as e:
+                    print(f"Error finding cutoff index for file [{file_key}] minimum pcm temp {df_copy['average_pcm_temp'].min():.2f} C temperature exceeds cutoff {water_temp_cutoff} C")
+                    m = re.search(r'setpoint-[^_]+_(.*?)_\d+gal', file_key)
+                    LUT = "bin/" + m.group(1) + '.csv'
+                    enthalpy_lut = np.loadtxt(LUT, delimiter=",", skiprows=1)
+                    temps = enthalpy_lut[:,0]
+                    enths = enthalpy_lut[:,2]
+
+                    # interpolate at cutoff temperature
+                    h_cutoff = np.interp(water_temp_cutoff, temps, enths)
+
+                    # for logging, find bracketing temps
+                    pos = np.searchsorted(temps, water_temp_cutoff)
+                    if 0 < pos < len(temps):
+                        t0, t1 = temps[pos-1], temps[pos]
+                        print(f"Interpolated enthalpy from {LUT} between {t0:.2f}°C and {t1:.2f}°C for cutoff {water_temp_cutoff}°C")
+                    else:
+                        print(f"Using endpoint enthalpy from {LUT} LUT at {temps[pos if pos<len(temps) else -1]:.2f}°C")
+
+                    # scale by PCM mass [kg] → J
+                    baseline_enthalpy = h_cutoff * df_copy['PCM Mass (kg)'].iloc[-1] * 1000
+                    df_copy['average_pcm_temp'] = df_copy[pcm_columns].mean(axis=1)
+             
+                
+            
         
-        # Calculate average temperature if first_hour_test is enabled
-        if first_hour_test and current_event['temp_readings']:
-            current_event['avg_temp'] = sum(current_event['temp_readings']) / len(current_event['temp_readings'])
+            # --- iterate rows ---
+            for timestamp, row in df_copy.iterrows():
+                flow = row[water_draw_col]
+                temp = row[water_outlet_temp]
+                heat_W = row[water_output_W_col]
+                dt = row['time_delta']
+                if is_pcm:
+                    avg_end_pcm_temp = row['average_pcm_temp']
+                    enthalpy = row['Total PCM Enthalpy (J)']
+                
+                if flow > 0:
+                    if not is_draw_active:
+                        is_draw_active = True
+                        current_event = {
+                            'start_time': timestamp,
+                            'end_time': None,
+                            'water_volume_L': 0,
+                            'heat_delivered_J': 0,
+                            'max_temp': temp,
+                            'min_temp': temp,
+                            'max_flow_rate': flow,
+                            'temp_readings': [] if first_hour_test else None,
+                        }
+                    # update envelope
+                    current_event['end_time'] = timestamp
+                    current_event['max_flow_rate'] = max(current_event['max_flow_rate'], flow)
+                    current_event['max_temp']      = max(current_event['max_temp'], temp)
+                    current_event['min_temp']      = min(current_event['min_temp'], temp)
+                    
+                    if first_hour_test:
+                        current_event['temp_readings'].append(temp)
+                    
+                    # only count “hot” volume & energy
+                    if temp >= water_temp_cutoff:
+                        # note: W * s → J, and (L/min)*(s)→L
+                        water_L = 3 / L_TO_GAL_RATIO / (60/dt)
+                        energy_J = heat_W / (60/dt)
+                        total_water_volume_L += water_L
+                        total_heat_delivered_J += energy_J
+                        current_event['water_volume_L']  += water_L
+                        current_event['heat_delivered_J'] += energy_J
+                
+                elif is_draw_active:
+                    # draw ended
+                    if current_event and current_event['water_volume_L'] > 0:
+                        # finalize event
+                        current_event['water_volume_gal']    = current_event['water_volume_L'] * L_TO_GAL_RATIO
+                        current_event['heat_delivered_kWh']  = current_event['heat_delivered_J'] * 2.77778e-7
+                        if first_hour_test and current_event['temp_readings']:
+                            current_event['avg_temp'] = (
+                                sum(current_event['temp_readings']) / len(current_event['temp_readings'])
+                            )
+                        if is_pcm:
+                            current_event['pcm_enthalpy'] = enthalpy
+                            current_event['avg_pcm_temp'] = avg_end_pcm_temp
+                            current_event['pcm_soc'] = (enthalpy - baseline_enthalpy) / (baseline_enthalpy)
+                        draw_events.append(current_event)
+                    is_draw_active = False
+                    current_event = None
             
-        draw_events.append(current_event)
-    
-    total_water_volume_gal = total_water_volume_L * L_TO_GAL_RATIO
-    max_water_volume_gal = max_water_volume_L * L_TO_GAL_RATIO
-    total_heat_delivered_kWh = total_heat_delivered_J * 2.77778e-7
-    total_energy_used_kwh = sum(df_copy[energy_used]) / 60 / 1000
-    
-    # Special calculation for first hour test
-    if first_hour_test and len(draw_events) >= 2:
-        # For the final draw calculation
-        final_draw = draw_events[-1]
-        second_to_final_draw = draw_events[-2]
-        
-        # Check if final draw meets the criteria (at least 30 seconds and above cutoff temp)
-        duration_seconds = (final_draw['end_time'] - final_draw['start_time']).total_seconds() \
-            if isinstance(final_draw['end_time'], pd.Timestamp) \
-            else final_draw['end_time'] - final_draw['start_time']
-        
-        if duration_seconds >= 30 and final_draw['max_temp'] >= water_temp_cutoff:
-            # Calculate adjustment using the formula
-            adjustment_factor = ((final_draw['avg_temp'] - second_to_final_draw['min_temp']) / 
-                                 (second_to_final_draw['avg_temp'] - second_to_final_draw['min_temp'])
-                                 if second_to_final_draw['avg_temp'] > second_to_final_draw['min_temp'] else 0)
+            # close last event if still open
+            if is_draw_active and current_event and current_event['water_volume_L'] > 0:
+                current_event['water_volume_gal']    = current_event['water_volume_L'] * L_TO_GAL_RATIO
+                current_event['heat_delivered_kWh']  = current_event['heat_delivered_J'] * 2.77778e-7
+                if first_hour_test and current_event['temp_readings']:
+                    current_event['avg_temp'] = (
+                        sum(current_event['temp_readings']) / len(current_event['temp_readings'])
+                    )
+                    if is_pcm: 
+                        current_event['pcm_enthalpy'] = enthalpy
+                        current_event['avg_pcm_temp'] = avg_end_pcm_temp
+                        current_event['pcm_soc'] = (enthalpy - baseline_enthalpy) / (baseline_enthalpy)
+                draw_events.append(current_event)
             
-            # Calculate the adjusted total volume
-            # adjusted_volume_gal = (total_water_volume_gal - final_draw['water_volume_gal']) + \
-            #                       (final_draw['water_volume_gal'] * adjustment_factor)
+            # aggregate totals
+            total_water_volume_gal    = total_water_volume_L * L_TO_GAL_RATIO
+            total_heat_delivered_kWh  = total_heat_delivered_J * 2.77778e-7
+            total_energy_used_kwh     = df_copy[energy_used_col].sum() / 60 / 1000
             
-            adjusted_volume_gal = total_water_volume_gal
+            # --- first‐hour adjustment ---
+            if first_hour_test and len(draw_events) >= 2:
+                final = draw_events[-1]
+                prev  = draw_events[-2]
+                
+                # duration in seconds
+                dur = (
+                    (final['end_time'] - final['start_time']).total_seconds()
+                    if hasattr(final['end_time'], 'to_pydatetime')
+                    else final['end_time'] - final['start_time']
+                )
+                if dur >= 30 and final['max_temp'] >= water_temp_cutoff:
+                    # compute adjustment factor
+                    denom = (prev.get('avg_temp', prev['min_temp']) - prev['min_temp']) or 1
+                    adj = ((final.get('avg_temp', final['min_temp']) - prev['min_temp']) / denom)
+                    # apply
+                    adjusted_gal = (total_water_volume_gal - final['water_volume_gal']) + \
+                                    (final['water_volume_gal'] * adj)
+                    total_water_volume_gal = adjusted_gal
+                    total_water_volume_L   = total_water_volume_gal / L_TO_GAL_RATIO
+                    
+                    
+            # grab the temperature of each pcm layer at the end of the list
+            try:
+                pcm_temps = [df[col].iloc[-1] for col in pcm_columns]
+                if len(pcm_temps) > 0:
+                    average_pcm_end_temp = sum(pcm_temps) / len(pcm_temps)
+                    pcm_soc = (df_copy[pcm_enthalpy_column].iloc[-1] - baseline_enthalpy) / (starting_pcm_enthalpy - baseline_enthalpy)
+                else:
+                    average_pcm_end_temp = 14.44
+                    pcm_soc = -100
+            except Exception as e:
+                print(f"Error calculating average PCM temperature for file [{file_key}]: {e}")
+                average_pcm_end_temp = 14.44
+                pcm_soc = -100
+
             
-            # Update the total volume
-            total_water_volume_gal = adjusted_volume_gal
-            total_water_volume_L = total_water_volume_gal / L_TO_GAL_RATIO
+            output[file_key] = {
+                "average_pcm_end_temp": average_pcm_end_temp,
+                "pcm_soc": pcm_soc,
+                'total_water_volume_L': total_water_volume_L,
+                'total_water_volume_gal': total_water_volume_gal,
+                'total_energy_used_kwh': total_energy_used_kwh,
+                'total_heat_delivered_J': total_heat_delivered_J,
+                'total_heat_delivered_kWh': total_heat_delivered_kWh,
+                'max_possible_hot_water': max_water_volume_L * L_TO_GAL_RATIO,
+                'draw_events': draw_events,
+                'num_draw_events': len(draw_events)
+            }
+        except Exception as e:
+            print(f"Error processing file [{file_key}]: {e}")
     
-    result = {
-        'total_water_volume_L': total_water_volume_L,
-        'total_water_volume_gal': total_water_volume_gal,
-        'total_energy_used_kwh': total_energy_used_kwh,
-        'total_heat_delivered_J': total_heat_delivered_J,
-        'total_heat_delivered_kWh': total_heat_delivered_kWh,
-        'max_possible_hot_water': max_water_volume_gal,
-        'draw_events': draw_events,
-        'num_draw_events': len(draw_events)
-    }
-    
-    return (file_key, result)
+    return output
+
 
 
 def parallel_calculate_hot_water_delivered(dfs, first_hour_test=False, num_processes=None):
     """
-    Parallel version of calculate_hot_water_delivered that processes multiple dataframes
-    concurrently using multiprocessing.
-    
-    Parameters:
-    -----------
-    dfs : dict
-        Dictionary of dataframes with time series data
-    first_hour_test : bool, optional
-        When True, applies special logic for the first hour test
-    num_processes : int, optional
-        Number of processes to use. Defaults to CPU count
-        
-    Returns:
-    --------
-    output : dict
-        Dictionary with calculation results for each file
+    Runs calculate_hot_water_delivered on each (file_key, df) *as a* one-item dict,
+    in parallel, and then merges all of the per-file outputs into one dict.
     """
-    # Default to number of CPUs if not specified
     if num_processes is None:
         num_processes = multiprocessing.cpu_count()
-    
-    # Create a pool of workers
-    pool = multiprocessing.Pool(processes=min(num_processes, len(dfs)))
-    
-    # Create a partial function with fixed first_hour_test parameter
-    process_func = functools.partial(process_single_df_hot_water_delivered, first_hour_test=first_hour_test)
-    
-    # Process each dataframe in parallel
-    results = pool.starmap(process_func, dfs.items())
-    
-    # Close the pool and wait for all processes to complete
-    pool.close()
-    pool.join()
-    
-    # Combine results into a dictionary
-    output = dict(results)
-    
+
+    # build a list of (one_file_dict, first_hour_test) tuples
+    tasks = [
+        ({file_key: df}, first_hour_test)
+        for file_key, df in dfs.items()
+    ]
+
+    with multiprocessing.Pool(processes=min(num_processes, len(tasks))) as pool:
+        # each call returns a dict of shape {file_key: result_for_that_file}
+        per_file_dicts = pool.starmap(calculate_hot_water_delivered, tasks)
+
+    # merge all of the single-entry dicts into one
+    output = {}
+    for d in per_file_dicts:
+        output.update(d)
+
     return output
 
 
@@ -2584,6 +2671,32 @@ def plot_pcm_enthalpies(profiles, names=None):
             line=dict(color=color, dash='dash'),
             yaxis='y2'
         ))
+        
+        # add vertical line at 125 F
+        # compute full cp‑axis range
+        all_cp = np.hstack([df[:,1] for df in profiles])
+        cp_min, cp_max = all_cp.min(), all_cp.max()
+
+        setpoint_C = (125 - 32) / 1.8  # 125 °F in °C
+        setpoint_C2 = (110 -32) / 1.8  # 110 °F in °C
+        
+        fig.add_trace(go.Scatter(
+            x=[setpoint_C, setpoint_C],
+            y=[cp_min,   cp_max],
+            mode='lines',
+            line=dict(color='red', dash='solid'),
+            name='125°F Setpoint',
+            showlegend=True
+        ))
+        
+        fig.add_trace(go.Scatter(
+            x=[setpoint_C2, setpoint_C2],
+            y=[cp_min,   cp_max],
+            mode='lines',
+            line=dict(color='red', dash='dash'),
+            name='110°F Cutoff Temp',
+            showlegend=True
+        ))
 
     fig.update_layout(
         title='PCM cp and Enthalpy vs Temperature',
@@ -2595,7 +2708,7 @@ def plot_pcm_enthalpies(profiles, names=None):
             side='right',
             showgrid=False
         ),
-        legend=dict(x=0.05, y=0.95),
+        # legend=dict(x=0.05, y=0.95),
         height=600
     )
     return fig
@@ -2775,12 +2888,12 @@ def parallel_display_plots(plots, stagger_delay=0, num_processes=None):
 # Example usage:
 if __name__ == "__main__":
     # Load data
-    # _start_time = time.perf_counter()
-    # _start_time_plot_results = time.perf_counter()
-    # print(os.getcwd())
+    _start_time = time.perf_counter()
+    _start_time_plot_results = time.perf_counter()
+    print(os.getcwd())
     
-    # dfs  = load_data(results_folder=graphing_results_folder)
-    # print(f"Data loading time: {time.perf_counter() - _start_time:.2f} seconds")
+    dfs  = load_data(results_folder=graphing_results_folder)
+    print(f"Data loading time: {time.perf_counter() - _start_time:.2f} seconds")
     
     # _uef_time = time.perf_counter()
     # uef = calculate_uef(dfs)
@@ -2811,26 +2924,28 @@ if __name__ == "__main__":
     #     fig.show()
 
     # # Draw data summary
-    # _hot_water_delivered_pool_time = time.perf_counter()
-    # output = parallel_calculate_hot_water_delivered(dfs, first_hour_test=True)
-    # print(f"Hot water delivered pool time: {time.perf_counter() - _hot_water_delivered_pool_time:.2f} seconds")
+    _hot_water_delivered_pool_time = time.perf_counter()
+    output = parallel_calculate_hot_water_delivered(dfs)
+    print(f"Hot water delivered pool time: {time.perf_counter() - _hot_water_delivered_pool_time:.2f} seconds")
     
     # _hot_water_plot_time = time.perf_counter()
     # plot_draw_event_summary(output)
     # print(f"Hot water plot time: {time.perf_counter() - _hot_water_plot_time:.2f} seconds")
     
-    # _hot_water_plot_time = time.perf_counter()
-    # plot_draw_event_summary(output, plot_energy=True)
-    # print(f"Hot water plot time: {time.perf_counter() - _hot_water_plot_time:.2f} seconds")
     
-    # plot_draw_events(output)
+    plot_draw_events(output)
+    plot_totals(output)
+    
+    # draw 2d matrix plot
     # plot_comparison(dfs, output)
+    
+    # pcms = [np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "Models", f"cp_h-T_data_shifted_{i}F.csv"), delimiter=",", skiprows=1) for i in range(110, 142, 2)]
     pcms = [np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "Models", "cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1)]
-    pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "Models", "60-40_PCM55-TPU_cp-h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
     pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "Models", "90-cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
+    pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "Models", "60-40_PCM55-TPU_cp-h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
     
-    
-    pcms_names = ['Bulk PCM', '60% Encapsulated 40% Polymer PCM', '90% Infiltrated Graphite PCM']
+    # pcms_names = [f'90% Infiltrated Graphite PCM {i}F' for i in range(110, 142, 2)]
+    pcms_names = ['Bulk PCM', '90% Graphite infiltrated PCM', '60-40 PCM polymer mix PCM 120F'] 
     
     fig = plot_pcm_enthalpies(pcms, pcms_names)
     fig.show()
