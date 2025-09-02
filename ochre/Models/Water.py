@@ -64,6 +64,7 @@ class StratifiedWaterModel(RCModel):
 
         # key variables for results
         self.draw_total = 0  # in L
+        self.draw_tempered = None  # in L, for fixtures only
         self.h_delivered = 0  # heat delivered in outlet water, in W
         self.h_injections = 0  # heat from water heater, in W
         self.h_loss = 0  # conduction heat loss from tank, in W
@@ -141,6 +142,7 @@ class StratifiedWaterModel(RCModel):
         if not (draw_tempered + draw_hot):
             # No water draw
             self.draw_total = 0
+            self.draw_tempered = 0
             self.h_delivered = 0
             self.h_unmet_load = 0
             return heats_to_model
@@ -151,13 +153,15 @@ class StratifiedWaterModel(RCModel):
         # calculate total draw volume from tempered draw volume(s)
         # for tempered draw, assume outlet temperature == T1, slightly off if the water draw is very large
         self.draw_total = draw_hot
+
         if draw_tempered:
+            self.draw_tempered = draw_tempered
             if self.outlet_temp <= self.tempered_draw_temp:
                 self.draw_total += draw_tempered
             else:
                 vol_ratio = (self.tempered_draw_temp - self.mains_temp) / (self.outlet_temp - self.mains_temp)
-                # self.draw_total += draw_tempered * vol_ratio
-                self.draw_total += draw_tempered
+                self.draw_total += draw_tempered * vol_ratio
+                # self.draw_total += draw_tempered
         # if draw_cw:
         #     if self.outlet_temp <= self.washer_draw_temp:
         #         self.draw_total += draw_cw
@@ -333,6 +337,8 @@ class StratifiedWaterModel(RCModel):
             results['Hot Water Unmet Demand (kW)'] = self.h_unmet_load / 1000
         if self.verbosity >= 6:
             water_states = self.states[: self.n_nodes]
+            if self.draw_tempered is not None:
+                results['Total Water Output (L/min)'] = self.draw_tempered
             results['Hot Water Heat Injected (W)'] = self.h_injections
             results['Hot Water Heat Loss (W)'] = self.h_loss
             results["Hot Water Average Temperature (C)"] = water_states.dot(self.vol_fractions)

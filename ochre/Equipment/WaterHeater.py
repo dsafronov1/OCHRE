@@ -10,7 +10,7 @@ import datetime as dt
 from ochre.utils import OCHREException
 from ochre.utils.units import convert, kwh_to_therms
 from ochre.Equipment import Equipment
-from ochre.Models import OneNodeWaterModel, TwoNodeWaterModel, StratifiedWaterModel, IdealWaterModel, TankWithMultiPCM
+from ochre.Models import OneNodeWaterModel, TwoNodeWaterModel, StratifiedWaterModel, IdealWaterModel
 
 
 class WaterHeater(Equipment):

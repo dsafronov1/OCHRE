@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import os
 import shutil
+from contextvars import ContextVar
 
 from ochre import (
     HeatPumpWaterHeater,
@@ -74,8 +75,9 @@ simulation_duration_days = 220
 
 # pcm_file_names = ['cp_h-T_data_shifted_120F.csv']
 pcm_file_names = ['90-cp_h-T_data_shifted_120F.csv']
+# pcm_file_names = [f'90%_cp_h-T_data_shifted_{i}F.csv' for i in range(110, 142, 1)]
 
-setpoint_temps_f = [125]
+setpoint_temps_f = [140]
 # setpoint_temps_f = [125, 140]
 setpoint_temps_c = [
     (setpoint_temp - 32) * (5 / 9) for setpoint_temp in setpoint_temps_f
@@ -88,8 +90,8 @@ setpoint_temps_c = [
 
 films_h = [150, 1000]
 pcms_thickness_in = [1.2]
-pcms_segment_thickness_inches = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
-
+pcms_segment_thickness_inches = [1.2]
+# pcms_segment_thickness_inches = [1.2]
 
 # tank_volume_gal = [40,50, 65]
 tank_volume_gal = [40]
@@ -301,7 +303,8 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
                     print(f"[{t}] → TEST COMPLETE: delivered {total_gallons_delivered:.2f} gallons")
                     # We don't break immediately to ensure the final state is properly updated
                     # Instead, we'll break at the end of this iteration
-        
+        SCHEDULE_CTX = ContextVar("SCHEDULE_CTX", default=None)
+        SCHEDULE_CTX.set(control_signal)
         _ = wh.update(schedule_inputs=control_signal)
 
         # If test completed inside the 'if enable_first_hour_test' block, break from the outer loop
@@ -574,16 +577,18 @@ def calculate_net_water_energy(volume, temperature, temperature_difference):
 
 def calculate_uef(df, water_volume):
     # calculate UEF of the water tank
-    Q_cons = (
-        df["Water Heating Electric Power (kW)"].sum() * 1000
-    )  # not sure if this is the correct term that I should be pulling
-    Q_load = df[
-        "Hot Water Delivered (W)"
-    ].sum()  # not sure if this is the correct term that I should be pulling
+    df['Time'] = df.index
+    df['dt_s'] = df['Time'].diff().dt.total_seconds().fillna(0)
+
+    # Electric heating energy (from kW to W, then multiply by seconds)
+    Q_cons = ((df["Water Heating Electric Power (kW)"] * 1000) * df['dt_s']).sum()
+
+    # Hot water delivered energy (already in W, multiply by seconds)
+    Q_load = (df["Hot Water Delivered (W)"] * df['dt_s']).sum()
 
     PCM_Q_Heat_to_Water = calculate_net_PCM_heat(df)  # make sure in W*min
     PCM_net_enthalpy = calculate_net_PCM_enthalpy(df)
-    PCM_net_heat_loss = PCM_net_enthalpy / 60  # make sure in W*min
+    PCM_net_heat_loss = PCM_net_enthalpy
     water_net_temp_delta = calculate_net_water_temp(df)
     water_net_energy = (
         calculate_net_water_energy(
@@ -591,7 +596,6 @@ def calculate_uef(df, water_volume):
             df["Hot Water Average Temperature (C)"].iloc[-1],
             water_net_temp_delta,
         )
-        / 60
     )  # make sure in W*min
     Q_cons_total = Q_cons - PCM_net_heat_loss - water_net_energy  # make sure in W*min
     UEF = Q_load / Q_cons_total
@@ -622,7 +626,8 @@ def run_water_heater_electric(default_args, setpoint_temp, tank_volume):
         "Setpoint Temperature (C)": setpoint_temp,
         "Tank Volume (L)": tank_volume * GAL_TO_L * 0.9,
         "Tank Height (m)": 1.22,
-        "UA (W/K)": 2.17,
+        "UA (W/K)": 2.17, # 3.6 BTU/hr-F https://www.resnet.us/about/standards/resnet-ansi/draft-pds-01-resnet-icc-301-2022-addendum-f-202x-integrated-heat-pump-water-heater/
+                            # direct short heat loss is about 30% of this measured value
         # "UA (W/K)": 1e-9, 
         # "schedule": schedule,
         "Capacity (W)": 4500,

@@ -1,3 +1,4 @@
+from matplotlib.pylab import f
 import numpy as np
 import os
 import math
@@ -5,6 +6,8 @@ import math
 from ochre.Models import StratifiedWaterModel
 
 from typing import Dict, Optional
+
+from ochre.utils import schedule
 
 
 
@@ -36,7 +39,7 @@ DEFAULT_PCM_PROPERTIES = {
         "pcm_conductivity": 2.6,  # W/m-C, not used
         # "pcm_c": 1823.8,  # J/m**3-C, not used
     },
-    "enthalpy_lut": np.loadtxt(os.path.join(os.path.dirname(__file__), "cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1)
+    "enthalpy_lut": np.loadtxt(os.path.join(os.path.dirname(__file__), "../defaults/pcm_configs/cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1)
 }
 
 def calculate_interpolation_data(pcm_properties):
@@ -212,7 +215,7 @@ class TankWithMultiPCM(StratifiedWaterModel):
 
         
         pcm_file = self.pcm_properties.get('enthalpy_lut') or 'cp_h-T_data_52_6C.csv'
-        full_path = os.path.join(os.path.dirname(__file__), pcm_file)
+        full_path = os.path.join(os.path.dirname(__file__), f"../defaults/pcm_configs/{pcm_file}")
         self.pcm_properties['enthalpy_lut'] = np.loadtxt(full_path, delimiter=",", skiprows=1)
         self.pcm_properties['enthalpy_lut_file'] = pcm_file
 
@@ -230,7 +233,6 @@ class TankWithMultiPCM(StratifiedWaterModel):
         self.ha = self.pcm_properties['h_conv']
         self.conductivity= self.pcm_properties['solid']['pcm_conductivity']
         self.key_temp, self.key_specific_heats, self.key_enthalpy = calculate_interpolation_data(self.pcm_properties)
-        self.key_enthalpy *= self.pcm_mass  # in J
         # self.time_res = datetime.timedelta(seconds=5)
 
         # PCM state and input indices
@@ -499,8 +501,9 @@ class TankWithMultiPCM(StratifiedWaterModel):
         super().update_model(control_signal)
         
         # Only use temperatures output from state space model and enthalpies nothing else
-        enthalpy_state = np.interp(self.states[self.t_pcm_idx], self.key_temp, self.key_enthalpy)
-        enthalpy_next_state = np.interp(self.next_states[self.t_pcm_idx], self.key_temp, self.key_enthalpy)
+        masses = np.array([self.pcm_mass_dict[node] for node in self.pcm_water_nodes]) # in gs
+        enthalpy_state = np.interp(self.states[self.t_pcm_idx], self.key_temp, self.key_enthalpy) * masses
+        enthalpy_next_state = np.interp(self.next_states[self.t_pcm_idx], self.key_temp, self.key_enthalpy) * masses
         q_pcm = enthalpy_next_state - enthalpy_state
         self.pcm_heat_to_water_rc_network = -q_pcm / self.time_res.total_seconds()
         self.enthalpy_pcm = enthalpy_next_state
@@ -608,7 +611,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         # ------------------------------------------------------------------
         # Pre‑load PCM enthalpy lookup table
         pcm_file = self.pcm_properties.get("enthalpy_lut", "cp_h-T_data_52_6C.csv")
-        full_path = os.path.join(os.path.dirname(__file__), pcm_file)
+        full_path = os.path.join(os.path.dirname(__file__), f"../defaults/pcm_configs/{pcm_file}")
         self.pcm_properties["enthalpy_lut"] = np.loadtxt(full_path, delimiter=",", skiprows=1)
         self.pcm_properties["enthalpy_lut_file"] = pcm_file
 
@@ -664,22 +667,21 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         # -------------------------------------------------------------- post-init
 
         self.key_temp, self.key_specific_heats, self.key_enthalpy = calculate_interpolation_data(self.pcm_properties)
-        self.key_temp, self.key_cp_pcm, self.key_enthalpy_pcm = calculate_interpolation_data(self.pcm_properties)
-        self.key_enthalpy *= self.pcm_mass_kg * 1e3 # make sure mass is in grams due to pcm file units
+        # self.key_enthalpy *= (self.pcm_mass_kg * 1e3)
         
         
         # Dynamic state bookkeeping
         self.t_pcm_idx = [i for i, name in enumerate(self.state_names) if "T_PCM" in name]
         self.h_pcm_idx = [i for i, name in enumerate(self.input_names) if "H_PCM" in name]
+        self.t_wh_idx = [i for i, name in enumerate(self.state_names) if "T_WH" in name]
         # assert [self.state_names.index(f"T_WH{node}") for node in self.pcm_water_nodes] == self.t_pcm_wh_idx
         # self.h_pcm_wh_idx = [self.input_names.index(f"H_WH{node}") for node in self.pcm_water_nodes]
         
         self.t_pcm_wh_idx = [name for name in self.state_names if name.startswith("T_PCM")] 
         
         self.enthalpy_pcm: np.ndarray = np.interp(
-            self.states[self.t_pcm_idx], self.key_temp, self.key_enthalpy_pcm * self.pcm_mass_kg*1e3
+            self.states[self.t_pcm_idx], self.key_temp, self.key_enthalpy * self.pcm_mass_kg * 1e3
         )
-
         
     def load_rc_data(self, **kwargs):
         include_axial = kwargs.get("include_axial_conduction", True)
@@ -800,7 +802,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         print(f"  - Circumferential segments: {n_pcm_circumferential} (arc: {actual_circumferential_size*1000:.2f} mm)")
         print(f"  - Axial segments per layer: {n_pcm_axial} (height: {actual_pcm_axial_thickness*1000:.2f} mm)")
         print(f"  - Total PCM segments: {total_pcm_segments}")
-        print(f"  - Total PCM mass per layer: {total_pcm_segments/n_nodes * actual_pcm_segment_thickness * 1000:.1f} g")
+        
 
         # helper: radial conduction
         def R_cond(k, r1, r2):
@@ -821,7 +823,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         C_ins = mass_ins * c_ins
 
         # PCM segment calculations (updated with adjustable thickness)
-        pcm_density = self.pcm_properties["solid"]["pcm_density"] * 1e3 * 1e3  # convert to g/m³
+        pcm_density = self.pcm_properties["solid"]["pcm_density"] * 1e3 # convert to kg/m³
         cp_pcm = np.interp(start_T,
                            self.pcm_properties["enthalpy_lut"][:,0],
                            self.pcm_properties["enthalpy_lut"][:,1])
@@ -829,6 +831,9 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         # initialize PCM mass dictionary
         self.pcm_mass_dict = {}
         self.pcm_mass_kg = 0
+        
+    
+        # self.water_side_film_h = self.calculate_film_convective_heat_transfer_coefficient()
 
         # build RC network per stratum
         for i in range(1, n_nodes+1):
@@ -864,14 +869,14 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
                         min_vol = 1e-12  # 1 mm³ minimum
                         vol_segment = max(vol_segment, min_vol)
                         
-                        mass_segment = pcm_density * vol_segment
+                        mass_segment = pcm_density * vol_segment  # kg
                         
                         # Capacitance
-                        rc[f"C_{seg_id}"] = mass_segment * cp_pcm
+                        rc[f"C_{seg_id}"] = mass_segment * cp_pcm * 1e3 # cp_pcm in in J/g-C
                         
                         if seg_id not in self.pcm_mass_dict:
                             self.pcm_mass_dict[seg_id] = mass_segment
-                            self.pcm_mass_kg += mass_segment * 1e-3
+                            self.pcm_mass_kg += mass_segment
                         
                         # Robust resistance calculations with bounds checking
                         def safe_resistance(dr, area, k, min_r=1e-6, max_r=1e6):
@@ -954,122 +959,26 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         for i in range(1, n_nodes+1):
             rc.pop(f"R_WH{i}_AMB", None)
         self.rc_params = rc
+        print(f"Total PCM Mass (kg): {self.pcm_mass_kg:.2f}")
         return rc
     
-    
-
-    # def load_rc_data(self, **kwargs):
-    #     include_axial = kwargs.get("include_axial_conduction", True)
-    #     rc = super().load_rc_data(**kwargs)
-
-    #     n_nodes = len(self.vol_fractions)
-    #     A_layer = self.internal_area_m2 / n_nodes
-    #     L_layer = self.tank_height_m / n_nodes
-    #     start_T = kwargs.get("Setpoint Temperature (C)", 51.6666667)
-
-    #     # material props
-    #     rho_en = kwargs.get("rho_enamel", self.enamel_density)
-    #     c_en   = kwargs.get("c_enamel",   self.enamel_cp_value)
-    #     rho_st = kwargs.get("rho_steel",  self.steel_density)
-    #     c_st   = kwargs.get("c_steel",    self.steel_cp_value)
-    #     rho_ins= kwargs.get("rho_ins",    self.insulation_density)
-    #     c_ins  = kwargs.get("c_ins",      self.insulation_cp_value)
-    #     k_en   = kwargs.get("k_enamel",   self.enamel_k_value)
-    #     k_st   = kwargs.get("k_steel",    self.steel_k_value)
-    #     k_pcm  = self.pcm_properties["solid"]["pcm_conductivity"]
-    #     k_ins  = kwargs.get("insulation_k_value", self.insulation_k_value)
-    #     h_ext  = kwargs.get("h_ext",       8.0)
-
-    #     # radii for layers
-    #     r_w   = self.tank_radius_m
-    #     r_en  = r_w + self.enamel_thickness_m
-    #     r_st  = r_en + self.steel_wall_thickness_m
-    #     r_pcm = r_st + self.pcm_thickness_m
-    #     r_ins = r_pcm + self.insulation_thickness_m
-
-    #     # mid radii for axial conduction areas
-    #     r_mid_en  = r_w + 0.5*self.enamel_thickness_m
-    #     r_mid_st  = r_en + 0.5*self.steel_wall_thickness_m
-    #     r_mid_pcm = r_st + 0.5*self.pcm_thickness_m
-    #     r_mid_ins = r_pcm + 0.5*self.insulation_thickness_m
-
-    #     A_vert_en  = 2*math.pi*r_mid_en * self.enamel_thickness_m
-    #     A_vert_st  = 2*math.pi*r_mid_st * self.steel_wall_thickness_m
-    #     A_vert_pcm = 2*math.pi*r_mid_pcm* self.pcm_thickness_m
-    #     A_vert_ins = 2*math.pi*r_mid_ins* self.insulation_thickness_m
-
-    #     # helper: radial conduction
-    #     def R_cond(k, r1, r2):
-    #         return math.log(r2/r1) / (2*math.pi * k * L_layer)
-
-    #     # compute capacitances & masses per layer
-    #     # enamel
-    #     vol_en = math.pi * (r_en**2-r_w**2) * L_layer
-    #     mass_en = rho_en * vol_en
-    #     C_en = mass_en * c_en
-    #     # steel
-    #     vol_st = math.pi * (r_st**2-r_en**2) * L_layer
-    #     mass_st = rho_st * vol_st
-    #     C_st = mass_st * c_st
-    #     # pcm
-    #     vol_pcm = math.pi*(r_pcm**2-r_st**2) * L_layer
-    #     mass_pcm = self.pcm_properties["solid"]["pcm_density"] * vol_pcm * 1e3 * 1e3 # make sure mass in g
-    #     cp_pcm = np.interp(start_T,
-    #                        self.pcm_properties["enthalpy_lut"][:,0],
-    #                        self.pcm_properties["enthalpy_lut"][:,1])
-    #     C_pcm = mass_pcm * cp_pcm
-    #     # insulation
-    #     vol_ins = math.pi * (r_ins**2-r_pcm**2) * L_layer
-    #     mass_ins = rho_ins * vol_ins
-    #     C_ins = mass_ins * c_ins
-
-    #     # initialize PCM mass dictionary
-    #     self.pcm_mass_dict = {}
-    #     self.pcm_mass_kg = 0
-
-    #     # build RC network per stratum
-    #     for i in range(1, n_nodes+1):
-    #         # water -> enamel convective
-    #         rc[f"R_WH{i}_ENM{i}"] = 1.0 / (self.water_side_film_h * A_layer)
-    #         # enamel
-    #         rc[f"C_ENM{i}"]      = C_en
-    #         rc[f"R_ENM{i}_STL{i}"] = R_cond(k_en, r_w, r_en)
-    #         # steel
-    #         rc[f"C_STL{i}"]       = C_st
-    #         rc[f"R_STL{i}_PCM{i}"] = R_cond(k_st, r_en, r_st)
-    #         # PCM
-    #         rc[f"C_PCM{i}"]       = C_pcm
-    #         self.pcm_mass_dict[i]   = mass_pcm
-    #         self.pcm_mass_kg += mass_pcm * 1e-3
-    #         rc[f"R_PCM{i}_INS{i}"] = R_cond(k_pcm, r_st, r_pcm)
-    #         # insulation
-    #         rc[f"C_INS{i}"]       = C_ins
-    #         R_ins_r = R_cond(k_ins, r_pcm, r_ins)
-    #         A_out = 2*math.pi*r_ins*L_layer + 2*math.pi*r_ins**2/n_nodes
-    #         rc[f"R_INS{i}_AMB"]   = R_ins_r + 1.0/(h_ext * A_out)
-
-    #         # axial conduction
-    #         if include_axial and i < n_nodes:
-    #             ni = i + 1
-    #             rc[f"R_ENM{i}_ENM{ni}"] = L_layer / (k_en  * A_vert_en)
-    #             rc[f"R_STL{i}_STL{ni}"] = L_layer / (k_st  * A_vert_st)
-    #             rc[f"R_PCM{i}_PCM{ni}"] = L_layer / (k_pcm * A_vert_pcm)
-    #             rc[f"R_INS{i}_INS{ni}"] = L_layer / (k_ins * A_vert_ins)
-
-    #     # remove original water->amb resistances
-    #     for i in range(1, n_nodes+1):
-    #         rc.pop(f"R_WH{i}_AMB", None)
-
-    #     self.rc_params = rc
-    #     return rc
-    
-    def update_rc_network(self, t_pcm, **kwargs):
+    def update_rc_network(self, t_pcm, states, current_schedule, **kwargs):
         '''Get the dynamic specific heat for each of the pcm nodes and update the capacitance in the rc_network'''
         
         pcm_specific_heats = np.interp(t_pcm, self.key_temp, self.key_specific_heats)
-        
 
         # Loop over each PCM node and apply the modifications
+        self.water_side_film_h = self.calculate_film_convective_heat_transfer_coefficient(states, current_schedule)
+        A_layer = self.internal_area_m2 / self.n_nodes
+        film_conv_resistance = 1/(self.water_side_film_h * A_layer)
+        
+        # Update in-place; collect whether each expected key existed
+        for i in range(1, self.n_nodes + 1):
+            key = f"R_WH{i}_ENM{i}"
+            if key in self.rc_params:
+                self.rc_params[key] = float(film_conv_resistance)
+
+
         for i, node in enumerate(self.pcm_mass_dict.items()):
             
             index = node[0]
@@ -1078,14 +987,14 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
 
             
             # Update the capacitance for this node (in J/K)
-            self.rc_params[f"C_{index}"] = pcm_specific_heat * pcm_node_mass
+            self.rc_params[f"C_{index}"] = pcm_specific_heat * pcm_node_mass * 1e3
             # self.rc_params[f"C_PCM{node}"] = 1e-3
         return self.rc_params
         
-    def update_state_space_model(self, **kwargs):
+    def update_state_space_model(self, states, current_schedule, **kwargs):
         
         pcm_temps = self.next_states[self.t_pcm_idx]
-        dynamic_rc_params = self.update_rc_network(pcm_temps)
+        dynamic_rc_params = self.update_rc_network(pcm_temps, states, current_schedule)
         all_cap = {name.upper().split('_')[1:][0]: val 
                for name, val in dynamic_rc_params.items() if name[0] == 'C'}
         all_res = {tuple(name.upper().split('_')[1:]): val 
@@ -1175,6 +1084,130 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         return 0 # keep zero for now to prevent double counting pcm heat transfer
 
     
+    def calculate_film_convective_heat_transfer_coefficient(self, states, current_schedule):
+        """
+        Compute & return the water-side film heat transfer coefficient h_conv [W/m^2-K].
+        Uses:
+        - Water temperatures: self.states at indices self.t_wh_idx (°C or K; auto-detected)
+        - Volumetric flow: self.current_schedule['Water Heating (L/min)'] (L/min)
+        - Geometry: self.tank_radius_m, self.tank_height_m
+        Correlations:
+        - Laminar entrance (Graetz): Nu_lam = 1.86*(Re*Pr*D/L)^(1/3)
+        - Turbulent (Dittus–Boelter, heating): Nu_turb = 0.023*Re^0.8*Pr^0.4
+        - Smooth transition 2300→4000
+        Fallback:
+        - If flow ~ 0, returns natural/free convection estimate via Churchill–Chu
+            using ΔT to ambient if available; else falls back to self.water_side_film_h or 10.
+        """
+
+        # ---- helpers: unit-safe temperature & water properties vs temperature ----
+        def _ensure_C(T_arr):
+            T_arr = np.asarray(T_arr, dtype=float)
+            # Heuristic: if temps look like Kelvin (>200), convert to °C
+            if np.nanmedian(T_arr) > 200.0:
+                return T_arr - 273.15
+            return T_arr
+
+        def water_props(Tc):
+            """
+            Rough but standard single-phase water property fits near room-temp to ~80°C.
+            Returns rho[kg/m3], mu[Pa·s], k[W/m·K], cp[J/kg·K], Pr[-].
+            """
+            Tk = Tc + 273.15
+            # Density (simple linear fit around 20–80°C)
+            rho = 1000.0 - 0.3*(Tc - 20.0)
+            rho = float(max(950.0, min(1000.0, rho)))
+            # Dynamic viscosity (Andrade; Pa·s)
+            mu = 2.414e-5 * 10.0**(247.8/(Tk - 140.0))
+            # Thermal conductivity (mild slope with T)
+            k = 0.561 + 0.0018*(Tc - 20.0)
+            k = float(max(0.55, min(0.68, k)))
+            # Specific heat
+            cp = 4180.0  # J/kg-K
+            # Prandtl
+            Pr = cp * mu / k
+            return rho, mu, k, cp, Pr
+
+        def smoothstep(x, x0=2300.0, x1=4000.0):
+            """0→1 smooth transition between x0 and x1."""
+            if x <= x0: return 0.0
+            if x >= x1: return 1.0
+            u = (x - x0)/(x1 - x0)
+            return u*u*(3 - 2*u)
+
+        # ---- input temperatures (water nodes) ----
+        T_nodes = _ensure_C(self.states[self.t_wh_idx])
+        T_meanC = float(np.nanmean(T_nodes))
+
+        # ---- flow from schedule: L/min → m^3/s ----
+        Q_lpm = 0.0
+        try:
+            if self.current_schedule is not None:
+                # Accept dict-like or pandas.Series-like
+                Q_lpm = current_schedule.get('Water Heating (L/min)', 0.0)
+        except Exception:
+            Q_lpm = 0.0
+        Q_m3s = max(0.0, Q_lpm / 1000.0 / 60.0)
+
+        # ---- geometry & area ----
+        r = float(self.tank_radius_m)
+        D = 2.0 * r
+        A = math.pi * r * r
+        L = float(getattr(self, "tank_height_m", D))  # characteristic length for entrance effects
+
+        # ---- properties at film temp ----
+        rho, mu, k, cp, Pr = water_props(T_meanC)
+
+        # ---- compute velocity, Reynolds, Graetz ----
+        # If flow is ~0, handle as natural convection (below)
+        if Q_m3s <= 1e-8 or A <= 0.0 or D <= 0.0:
+            # Try natural/free convection on internal surface as a fallback.
+            # Use ambient if present, else a small ΔT to avoid zero.
+            # Attempt to read ambient input (named 'T_AMB' typically).
+            T_ambC = None
+            try:
+                if hasattr(self, "input_names") and hasattr(self, "inputs"):
+                    if "T_AMB" in self.input_names:
+                        T_ambC = _ensure_C([self.inputs[self.input_names.index("T_AMB")]])[0]
+            except Exception:
+                T_ambC = None
+            if T_ambC is None:
+                # Fall back to a small driving ΔT to avoid zero Ra
+                T_ambC = T_meanC - 5.0
+
+            beta = 1.0 / (T_meanC + 273.15)  # ~1/T, 1/K
+            nu = mu / rho
+            g = 9.81
+            Ra = g * beta * abs(T_meanC - T_ambC) * (L**3) * Pr / (nu**2)
+            # Churchill–Chu for vertical surfaces (robust across Ra,Pr)
+            Cfac = (1.0 + (0.492 / max(Pr, 1e-12))**(9.0/16.0))**(8.0/27.0)
+            Nu_nat = (0.825 + (0.387 * (max(Ra, 1e-16))**(1.0/6.0)) / Cfac)**2
+            h_nat = Nu_nat * k / max(D, 1e-9)  # use D as characteristic
+            # Respect your provided fallback if present
+            if getattr(self, "water_side_film_h", None) is not None:
+                return float(max(0.0, min(5.0*self.water_side_film_h, h_nat)))  # be conservative
+            return float(h_nat)
+
+        u = Q_m3s / A
+        Re = rho * u * D / mu
+        Gz = Re * Pr * D / max(L, 1e-9)
+
+        # ---- Nusselt numbers (forced convection) ----
+        # Laminar entrance (Graetz)
+        Nu_lam = 1.86 * (max(Gz, 1e-16))**(1.0/3.0)
+        # Turbulent (Dittus–Boelter, heating)
+        Nu_turb = 0.023 * (max(Re, 1.0)**0.8) * (Pr**0.4)
+        # Smooth transition
+        S = smoothstep(Re, 2300.0, 4000.0)
+        Nu = (1.0 - S) * Nu_lam + S * Nu_turb
+
+        # ---- convective coefficient ----
+        h_conv = Nu * k / D
+
+        # If you have multiple nodes with varying local conditions, you could
+        # average per-node h here; for now, we return the scalar based on mean T & bulk flow.
+        return float(h_conv)
+        
 
     def update_inputs(self, schedule_inputs=None):
         # Note: self.inputs_init are not updated here, only self.current_schedule
@@ -1227,8 +1260,10 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         super().update_model(control_signal)
         
         # Only use temperatures output from state space model and enthalpies nothing else
-        enthalpy_state = np.interp(self.states[self.t_pcm_idx], self.key_temp, self.key_enthalpy)
-        enthalpy_next_state = np.interp(self.next_states[self.t_pcm_idx], self.key_temp, self.key_enthalpy)
+        # multiply those values out by the mass of pcm
+        masses = np.fromiter(self.pcm_mass_dict.values(), dtype=float) * 1e3 
+        enthalpy_state = np.interp(self.states[self.t_pcm_idx], self.key_temp, self.key_enthalpy) * masses
+        enthalpy_next_state = np.interp(self.next_states[self.t_pcm_idx], self.key_temp, self.key_enthalpy) * masses
         q_pcm = enthalpy_next_state - enthalpy_state
         self.pcm_heat_to_water_rc_network = -q_pcm / self.time_res.total_seconds()
         self.enthalpy_pcm = enthalpy_next_state
@@ -1241,7 +1276,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         # self.next_states[self.t_pcm_idx] = t_pcm
 
         # Call the state space model update (which may modify states, inputs, and inputs_init).
-        self.update_state_space_model()
+        self.update_state_space_model(self.states, self.current_schedule)
 
         # Reset the states and inputs to their original values so they stay constant between iterations.
         # self.states = original_states.copy()
@@ -1278,9 +1313,15 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
             results['Delta Total PCM Enthalpy (J)'] = self.delta_enthalpy_pcm.sum()
             results['Total PCM Heat Injected (W)'] = self.pcm_heat_to_water_rc_network.sum()
             results['PCM Mass (kg)'] = self.pcm_mass_kg
+            results['Film Tank Heat Transfer Coefficient (W/m^2-K)'] = self.water_side_film_h
             results['Water Volume (L)'] = self.volume
 
             
         return results
     
-    
+    # TODO FILM heat transfer coefficient changes with the water tank flow rate
+
+
+
+
+

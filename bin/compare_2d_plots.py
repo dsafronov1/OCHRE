@@ -173,6 +173,9 @@ def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title
         print(f"No valid data for {z_column}")
         return None
 
+    little_font_size = 16
+    medium_font_size = 18
+    
     # Points for interpolation
     points = df[['avg_x_value', 'avg_y_value']].values
     values = df[z_column].values
@@ -259,13 +262,13 @@ def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title
             colorbar=dict(
                 title=z_label,
                 ticks="outside",
-                tickfont=dict(size=12),
+                tickfont=dict(size=little_font_size),
                 len=0.75,
                 tickvals=tick_values,
                 ticktext=[f"{val:.1f}" for val in tick_values]
             ),
             ncontours=20,
-            contours=dict(showlabels=True, labelfont=dict(size=12, color='white')),
+            contours=dict(showlabels=True, labelfont=dict(size=little_font_size, color='white')),
             line=dict(width=0.5, smoothing=0.85),
             zmin=z_min_rounded,
             zmax=z_max_rounded,
@@ -282,14 +285,14 @@ def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title
             colorbar=dict(
                 title=z_label,
                 ticks="outside",
-                tickfont=dict(size=12),
+                tickfont=dict(size=little_font_size),
                 len=0.75,
                 tickvals=tick_values,
                 ticktext=[f"{val:.1f}" for val in tick_values],
                 tickmode='array'  # Force specific tick positions
             ),
             ncontours=20,
-            contours=dict(showlabels=True, labelfont=dict(size=12, color='white')),
+            contours=dict(showlabels=True, labelfont=dict(size=little_font_size, color='white')),
             line=dict(width=0.5, smoothing=0.85),
             zmin=tick_min_rounded,
             zmax=tick_max_rounded,
@@ -306,13 +309,13 @@ def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title
             colorbar=dict(
                 title=z_label,
                 ticks="outside",
-                tickfont=dict(size=12),
+                tickfont=dict(size=little_font_size),
                 len=0.75,
                 tickvals=tick_values,
                 ticktext=[f"{val:.1f}" for val in tick_values]
             ),
             ncontours=20,
-            contours=dict(showlabels=True, labelfont=dict(size=12, color='white')),
+            contours=dict(showlabels=True, labelfont=dict(size=little_font_size, color='white')),
             line=dict(width=0.5, smoothing=0.85),
             zmin=z_min_rounded,
             zmax=z_max_rounded
@@ -391,11 +394,33 @@ def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title
     title_with_baseline = f"{title} (Baseline Hot Water Delivered: {baseline_value:.2f} gal)" if baseline_value is not None else title
     fig.update_layout(
         title=title_with_baseline,
-        xaxis_title="PCM Thickness (in)",
-        yaxis_title="Water - Tank film_h value (W/m²K)",
+        title_font=dict(size=18),  # Larger main title
+        xaxis_title="SA/V Ratio",
+        yaxis_title="h_value (W/m²K)",
+        xaxis=dict(
+            tickfont=dict(size=20),   # Bigger tick labels
+            title_font=dict(size=22)  # Bigger axis title
+        ),
+        yaxis=dict(
+            tickfont=dict(size=20),   # Bigger tick labels
+            title_font=dict(size=22)  # Bigger axis title
+        ),
         height=600,
         width=800
     )
+    
+    fig.add_annotation(
+                        text="Grey = worse than baseline",
+                        xref="paper", yref="paper",
+                        x=0.01, y=0.99,  # adjust position (0=left/bottom,1=right/top)
+                        showarrow=False,
+                        align="left",
+                        font=dict(size=10, color="gray"),
+                        bordercolor="lightgray",
+                        borderwidth=1,
+                        bgcolor="white",
+                        opacity=0.8
+                        )
     
     return fig
     
@@ -561,61 +586,100 @@ def plot_2d_comparison(dfs, draw_outputs, setpoint, pcm_temp, tank_type, tank_si
     
     
 def plot_2d_comparison_generic(dfs, draw_outputs, x_column_pattern, y_column_pattern, setpoint=None, pcm_temp=None, tank_type=None, tank_size=None):
+    import logging, re, traceback
+    import numpy as np
+    import pandas as pd
+
+    # ---------- logger setup (scoped, non-invasive) ----------
+    logger = logging.getLogger("plot_2d_comparison_generic")
+    if not logger.handlers:
+        _h = logging.StreamHandler()
+        _h.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+        logger.addHandler(_h)
+        logger.setLevel(logging.DEBUG)
+
+    logger.debug(f"Start plot_2d_comparison_generic with {len(dfs)} dfs; "
+                 f"x_pattern='{x_column_pattern}', y_pattern='{y_column_pattern}', "
+                 f"setpoint={setpoint}, pcm_temp={pcm_temp}, tank_type={tank_type}, tank_size={tank_size}")
 
     data = []
     baseline_file = None
     baseline_value = None
-    
 
+    # Quick validation
+    if not isinstance(dfs, dict) or not dfs:
+        logger.error("`dfs` must be a non-empty dict of {filename: DataFrame}.")
+        return None
+    if not isinstance(draw_outputs, dict) or not draw_outputs:
+        logger.warning("`draw_outputs` is empty or not a dict; energy metrics may be None.")
+
+    # ---------- iterate inputs ----------
     for file, df in dfs.items():
-        # Check if this is a baseline file (without PCM in column names)
+        if df is None or not hasattr(df, "columns"):
+            logger.error(f"[{file}] df is not a DataFrame-like object.")
+            continue
+
+        logger.debug(f"[{file}] columns: {list(df.columns)}")
         has_pcm = any('PCM' in col for col in df.columns)
         is_baseline = not has_pcm
-        
-        # Extract values from columns matching the x and y patterns
-        x_values = []
-        y_values = []
-        
-        # For baseline, look for columns without PCM
-        if is_baseline:
-            baseline_file = file
-            # Extract values from non-PCM columns
-            for col in df.columns:
-                # Check for x-axis parameter
-                if x_column_pattern in col and "Water Tank" in col and "PCM" not in col:
-                    x_values.append(df[col].mean())
-                
-                # Check for y-axis parameter
-                if y_column_pattern in col and "Water Tank" in col and "PCM" not in col:
-                    y_values.append(df[col].mean())
-        else:
-            # Normal PCM extraction
-            for col in df.columns:
-                # Check for x-axis parameter with PCM pattern
-                pcm_match = re.search(r"Water Tank PCM(\d+)", col)
-                if pcm_match and x_column_pattern in col:
-                    x_values.append(df[col].mean())
-                
-                # Check for y-axis parameter with PCM pattern
-                if pcm_match and y_column_pattern in col:
-                    y_values.append(df[col].mean())
-        
-        # Compute average values if we found at least one value from each group
-        if x_values and y_values:
-            avg_x = sum(x_values) / len(x_values)
-            avg_y = sum(y_values) / len(y_values)
-        else:
-            avg_x = 0
-            avg_y = 0
+        logger.debug(f"[{file}] has_pcm={has_pcm}, is_baseline={is_baseline}")
 
-        # Get energy metrics from draw_outputs
-        total_gal_hot_water_delivered = draw_outputs[file].get('total_water_volume_gal', None)
-        total_delivered = draw_outputs[file].get('total_heat_delivered_kWh', None)
-        total_used = draw_outputs[file].get('total_energy_used_kwh', None)
-        first_draw_hot_water_delivered = draw_outputs[file].get('draw_events', [])[0].get('water_volume_gal', None)
-        average_pcm_temp = draw_outputs[file].get('average_pcm_temp', None)
-        
-        
+        x_values, y_values = [], []
+
+        try:
+            if is_baseline:
+                baseline_file = file
+                for col in df.columns:
+                    if (x_column_pattern in col) and ("Water Tank" in col) and ("PCM" not in col):
+                        val = df[col].astype(float).mean()
+                        x_values.append(val)
+                        logger.debug(f"[{file}] baseline X <- {col}: mean={val:.6g}")
+                    if (y_column_pattern in col) and ("Water Tank" in col) and ("PCM" not in col):
+                        val = df[col].astype(float).mean()
+                        y_values.append(val)
+                        logger.debug(f"[{file}] baseline Y <- {col}: mean={val:.6g}")
+            else:
+                for col in df.columns:
+                    pcm_match = re.search(r"Water Tank PCM(\d+)", col)
+                    if pcm_match and (x_column_pattern in col):
+                        val = df[col].astype(float).mean()
+                        x_values.append(val)
+                        logger.debug(f"[{file}] PCM X <- {col}: mean={val:.6g}")
+                    if pcm_match and (y_column_pattern in col):
+                        val = df[col].astype(float).mean()
+                        y_values.append(val)
+                        logger.debug(f"[{file}] PCM Y <- {col}: mean={val:.6g}")
+        except Exception as e:
+            logger.error(f"[{file}] Error while extracting X/Y: {e}\n{traceback.format_exc()}")
+
+        if x_values and y_values:
+            avg_x = float(np.nanmean(x_values))
+            avg_y = float(np.nanmean(y_values))
+        else:
+            logger.warning(f"[{file}] Missing values: x_values={len(x_values)}, y_values={len(y_values)}. Setting averages to 0.")
+            avg_x, avg_y = 0.0, 0.0
+
+        # ---------- draw_outputs / metrics ----------
+        do = draw_outputs.get(file, {})
+        if not do:
+            logger.warning(f"[{file}] draw_outputs missing for this file.")
+
+        total_gal_hot_water_delivered = do.get('total_water_volume_gal')
+        total_delivered = do.get('total_heat_delivered_kWh')
+        total_used = do.get('total_energy_used_kwh')
+        average_pcm_temp = do.get('average_pcm_temp')
+
+        draw_events = do.get('draw_events', None)
+        if isinstance(draw_events, list) and draw_events:
+            first_draw_hot_water_delivered = draw_events[0].get('water_volume_gal', None)
+        else:
+            first_draw_hot_water_delivered = None
+            logger.debug(f"[{file}] draw_events missing/empty; first_draw_hot_water_delivered=None")
+
+        logger.debug(f"[{file}] metrics: total_gal={total_gal_hot_water_delivered}, "
+                     f"delivered_kWh={total_delivered}, used_kWh={total_used}, "
+                     f"first_draw_gal={first_draw_hot_water_delivered}, avg_pcm_temp={average_pcm_temp}")
+
         data.append({
             'file': file,
             'avg_x_value': avg_x,
@@ -628,88 +692,132 @@ def plot_2d_comparison_generic(dfs, draw_outputs, x_column_pattern, y_column_pat
             "average_pcm_temp": average_pcm_temp
         })
 
-    # Create a DataFrame from the collected data
+    # ---------- assemble dataframe ----------
     df_plot = pd.DataFrame(data)
+    logger.debug(f"df_plot shape={df_plot.shape}\n{df_plot.head(10)}")
 
-    # Drop any rows with missing values for plotting
+    # Drop any rows with missing x/y
     df_plot_clean = df_plot.dropna(subset=['avg_x_value', 'avg_y_value'])
-    
-    # Get baseline value and then filter out baseline from plotting data
+    logger.debug(f"df_plot_clean after x/y dropna shape={df_plot_clean.shape}")
+
+    # baseline value
     if baseline_file:
         baseline_row = df_plot_clean[df_plot_clean['is_baseline'] == True]
         if not baseline_row.empty:
             baseline_value = baseline_row['total_gal_hot_water_delivered'].values[0]
-    
-    # Filter out baseline case from plotting data
+            logger.debug(f"baseline_file={baseline_file}, baseline_value(total_gal)={baseline_value}")
+        else:
+            logger.debug("No baseline row found after cleaning.")
+    else:
+        logger.debug("No baseline_file identified.")
+
+    # filter out baseline from plotting
+    pre_filter_rows = df_plot_clean.shape[0]
     df_plot_clean = df_plot_clean[df_plot_clean['is_baseline'] == False]
-    
+    logger.debug(f"Filtered out baseline rows: {pre_filter_rows} -> {df_plot_clean.shape[0]}")
+
     if df_plot_clean.empty:
-        print("No non-baseline data available for plotting")
+        logger.error("No non-baseline data available for plotting.")
         return None
 
-    # Create interpolation grid
-    grid_resolution = 100
-    x_min, x_max = df_plot_clean['avg_x_value'].min(), df_plot_clean['avg_x_value'].max()
-    y_min, y_max = df_plot_clean['avg_y_value'].min(), df_plot_clean['avg_y_value'].max()
-
-    # Add a small buffer to avoid edge issues
-    x_buffer = (x_max - x_min) * 0.05
-    y_buffer = (y_max - y_min) * 0.05
-
-    x_grid = np.linspace(x_min - x_buffer, x_max + x_buffer, grid_resolution)
-    y_grid = np.linspace(y_min - y_buffer, y_max + y_buffer, grid_resolution)
-    x_mesh, y_mesh = np.meshgrid(x_grid, y_grid)
-
-    # Create the plot title with dynamic parameter names
-    plot_title = f"{y_column_pattern} vs {x_column_pattern} Design Matrix with Cut off Temp 110°F for {tank_type} Water Heater<br>Setpoint: {setpoint}°F PCM Melt Temp: {pcm_temp}°F <br>Tank Size: {tank_size} gal"
-    
-    fig_total_water = create_interpolated_plot(
-        df_plot_clean.dropna(subset=['total_gal_hot_water_delivered']),
-        'total_gal_hot_water_delivered', x_mesh, y_mesh, x_grid, y_grid,
-        plot_title,
-        "Total Hot Water (>110°F)<br>Delivered (gal)",
-        baseline_value
-    )
-    
-    fig_firstdraw_water = create_interpolated_plot(
-        df_plot_clean.dropna(subset=['first_draw_hot_water_delivered']),
-        'first_draw_hot_water_delivered', x_mesh, y_mesh, x_grid, y_grid,
-        plot_title,
-        "First Draw Hot Water (>110°F)<br>Delivered (gal)",
-        baseline_value
-    )
-
+    # ---------- interpolation grid ----------
     try:
-        avg_pcm_temp_plot = create_interpolated_plot(
-            df_plot_clean.dropna(subset=['average_pcm_temp']),
-            'average_pcm_temp', x_mesh, y_mesh, x_grid, y_grid,
-            plot_title,
-            "Average PCM Temperature (°F)",
-            baseline_value
-        )
-        avg_pcm_temp_plot.show()
+        grid_resolution = 100
+        x_min, x_max = df_plot_clean['avg_x_value'].min(), df_plot_clean['avg_x_value'].max()
+        y_min, y_max = df_plot_clean['avg_y_value'].min(), df_plot_clean['avg_y_value'].max()
+        logger.debug(f"x_range=({x_min}, {x_max}), y_range=({y_min}, {y_max})")
+
+        # buffer handling (avoid zero span)
+        x_span = float(x_max - x_min)
+        y_span = float(y_max - y_min)
+        if x_span == 0:
+            logger.warning("x_span is zero; expanding artificially by ±1.")
+            x_min, x_max = x_min - 1.0, x_max + 1.0
+            x_span = 2.0
+        if y_span == 0:
+            logger.warning("y_span is zero; expanding artificially by ±1.")
+            y_min, y_max = y_min - 1.0, y_max + 1.0
+            y_span = 2.0
+
+        x_buffer = max(x_span * 0.05, 1e-9)
+        y_buffer = max(y_span * 0.05, 1e-9)
+
+        x_grid = np.linspace(x_min - x_buffer, x_max + x_buffer, grid_resolution)
+        y_grid = np.linspace(y_min - y_buffer, y_max + y_buffer, grid_resolution)
+        x_mesh, y_mesh = np.meshgrid(x_grid, y_grid)
+        logger.debug(f"Grid shapes: x_grid={x_grid.shape}, y_grid={y_grid.shape}, x_mesh={x_mesh.shape}, y_mesh={y_mesh.shape}")
     except Exception as e:
-        print(f"Error creating avg_pcm_temp_plot: {e}")
-    # Show the plot
-    if fig_total_water:
-        fig_total_water.show()
-        
-    if fig_firstdraw_water:
-        fig_firstdraw_water.show()
-        
-    # if avg_pcm_temp_plot:
-    #     avg_pcm_temp_plot.show() 
-    
-    return {
+        logger.error(f"Error building interpolation grid: {e}\n{traceback.format_exc()}")
+        return None
+
+    # ---------- plotting ----------
+    def _safe_plot(df_in, z_col, title, z_label):
+        try:
+            if df_in is None or df_in.empty:
+                logger.warning(f"Skip plot for {z_col}: input df is empty.")
+                return None
+            logger.debug(f"Plotting {z_col}: rows={df_in.shape[0]}, na_counts={df_in.isna().sum().to_dict()}")
+            fig = create_interpolated_plot(
+                df_in.dropna(subset=[z_col]),
+                z_col, x_mesh, y_mesh, x_grid, y_grid,
+                title, z_label, baseline_value
+            )
+            if fig is None:
+                logger.warning(f"create_interpolated_plot returned None for {z_col}.")
+            return fig
+        except Exception as e:
+            logger.error(f"Exception plotting {z_col}: {e}\n{traceback.format_exc()}")
+            return None
+
+    title_total = (
+        f"74% Back Filled Resin First-Hour Rating: {y_column_pattern} vs SA/V Ratio<br>"
+        f"Cutoff=110°F; Setpoint={setpoint}°F; PCM Melt={pcm_temp}°F<br>Tank Size: {tank_size} gal"
+    )
+    fig_total_water = _safe_plot(
+        df_plot_clean.dropna(subset=['total_gal_hot_water_delivered']),
+        'total_gal_hot_water_delivered',
+        title_total,
+        "Total Hot Water (>110°F)<br>Delivered (gal)"
+    )
+
+    title_first = (
+        f"74% Back Filled Resin Initial Draw Rating: {y_column_pattern} vs SA/V Ratio<br>"
+        f"Cutoff=110°F; Setpoint={setpoint}°F; PCM Melt={pcm_temp}°F<br>Tank Size: {tank_size} gal"
+    )
+    fig_firstdraw_water = _safe_plot(
+        df_plot_clean.dropna(subset=['first_draw_hot_water_delivered']),
+        'first_draw_hot_water_delivered',
+        title_first,
+        "First Draw Hot Water (>110°F)<br>Delivered (gal)"
+    )
+
+    # Display (guarded)
+    try:
+        if fig_total_water:
+            logger.debug("Showing fig_total_water.")
+            fig_total_water.show()
+        if fig_firstdraw_water:
+            logger.debug("Showing fig_firstdraw_water.")
+            fig_firstdraw_water.show()
+    except Exception as e:
+        logger.error(f"Error showing figures: {e}\n{traceback.format_exc()}")
+
+    result = {
         "baseline_value": baseline_value,
         "baseline_file": baseline_file,
         "figures": {
-            "water": fig_total_water
+            "water": fig_total_water,
+            "first_draw": fig_firstdraw_water
+        },
+        "debug": {
+            "rows_total": int(df_plot.shape[0]),
+            "rows_clean": int(df_plot_clean.shape[0]),
+            "x_range": (float(x_min), float(x_max)),
+            "y_range": (float(y_min), float(y_max)),
         }
     }
-
-    
-
+    logger.debug(f"Result summary: {result['debug']}")
+    return result
 
 # Predefined lookup arrays for water properties at 1 atm.
 _TEMPS = np.array([0, 4, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100], dtype=float)
@@ -1734,7 +1842,7 @@ RED = "\033[91m"
 
 # Compile these once at module load
 SETPOINT_REGEX = re.compile(r"(\d+(?:\.\d+)?)F$")
-PCM_SHIFT_REGEX = re.compile(r"90-cp_h-T_data_shifted_(\d+(?:\.\d+)?)F", re.IGNORECASE)
+PCM_SHIFT_REGEX = re.compile(r"60-40_PCM55-TPU_cp-h-T_data_shifted_(\d+(?:\.\d+)?)F", re.IGNORECASE)
 TYPE_REGEX = re.compile(r"(Electric|Heat[Pp]ump)")
 SIZE_REGEX = re.compile(r"(\d+)gal")
 
@@ -1778,8 +1886,8 @@ def process_single_folder(output_folder, folder):
         print(f"⚠️  Tank size {tank_size} is not 40gal")
         return
     
-    if pcm_temp != 120:
-        print(f"⚠️  PCM temperature {pcm_temp} is not 120F")
+    if pcm_temp != 131:
+        print(f"⚠️  PCM temperature {pcm_temp} is not 131F")
         return
     
     # 3. Build the full folder path and load data
@@ -1789,7 +1897,7 @@ def process_single_folder(output_folder, folder):
     outputs = calculate_hot_water_delivered(dfs, first_hour_test=False)
     # plot_draw_event_summary(output)
     # plot_draw_events(output)
-    plot_2d_comparison_generic(dfs, outputs, "PCM Thickness", "film_h", setpoint, pcm_temp, tank_type, tank_size)
+    plot_2d_comparison_generic(dfs, outputs, "sa_ratio", "h (W/m^2K)", setpoint, pcm_temp, tank_type, tank_size)
     
     print(f"✅ Finished processing setpoint={setpoint}F with pcm_temp={pcm_temp}F for tank type {tank_type} at {tank_size}gal in {output_folder}")
     

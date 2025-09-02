@@ -15,6 +15,7 @@ import colorsys
 from concurrent.futures import ThreadPoolExecutor
 
 from calculate_hot_water_delivered import calculate_hot_water_delivered
+from ochre.utils.units import Q_
 
 
 L_TO_GAL_RATIO = 0.264172
@@ -27,20 +28,31 @@ def load_data(results_folder='../OCHRE_output/results/'):
     return {file: pd.read_csv(os.path.join(results_folder, file)) for file in csv_files}
 
 def find_matching_columns(df, patterns):
-    """Find columns that match the given patterns and group them."""
+    """Find columns that match the given patterns and group them.
+
+    Matches:
+      T_WH1, T_WH2, …
+      T_PCM7-1-1-1, T_PCM12-3-4-2, …
+    """
     column_groups = {pattern: [] for pattern in patterns}
-    
+    # build a regex once per pattern
+    regexes = {
+        pattern: re.compile(rf"^{pattern}\d+(?:-\d+)*$")
+        for pattern in patterns
+    }
+
     for col in df.columns:
-        for pattern in patterns:
-            # Use regex to match pattern followed by a number
-            match = re.match(f"{pattern}(\\d+)$", col)
-            if match:
+        for pattern, rx in regexes.items():
+            if rx.match(col):
                 column_groups[pattern].append(col)
-    
-    # Sort columns within each group by node number
-    for pattern in patterns:
-        column_groups[pattern].sort(key=lambda x: int(re.findall(r'\d+', x)[0]))
-    
+
+    # sort by all numeric parts (so PCM7-1-1-1 comes after PCM7-1-1-0, etc.)
+    for pattern, cols in column_groups.items():
+        column_groups[pattern] = sorted(
+            cols,
+            key=lambda name: tuple(int(n) for n in re.findall(r"\d+", name))
+        )
+
     return column_groups
 
 def adjust_lightness(color, factor):
@@ -319,7 +331,11 @@ def plot_draw_events(draw_outputs):
     """
     For each file, create grouped bar charts of draw events.
     zDefault files get black bars; all others use the default color cycle.
+    Also adds a draw count number for each event group.
     """
+    from plotly.subplots import make_subplots
+    import plotly.graph_objects as go
+
     # Find max number of events and labels
     max_events = max(len(m['draw_events']) for m in draw_outputs.values())
     event_numbers = [f"Event {i+1}" for i in range(max_events)]
@@ -347,7 +363,7 @@ def plot_draw_events(draw_outputs):
         shared_xaxes=True
     )
 
-    # Add traces, only zDefault gets marker_color='black'
+    # Add traces
     for row, data_dict, fmt in [
         (1, water_data, "{:.2f}"),
         (2, heat_data, "{:.3f}")
@@ -364,12 +380,24 @@ def plot_draw_events(draw_outputs):
                 params["marker_color"] = "black"
             fig.add_trace(go.Bar(**params), row=row, col=1)
 
+    # Add draw count number above each group in first row
+    for i, label in enumerate(event_numbers):
+        fig.add_annotation(
+            x=label,
+            y=max([v[i] for v in water_data.values() if v[i] is not None]) * 1.05,
+            text=str(i + 1),
+            showarrow=False,
+            font=dict(size=12, color="red"),
+            row=1, col=1
+        )
+
     fig.update_layout(
         barmode='group',
         title_text="Draw Events Grouped by Event Number Across Files",
         xaxis_title="Draw Event"
     )
     fig.show()
+
 
 
 def plot_totals(draw_outputs):
@@ -945,218 +973,208 @@ def get_column_index(col):
         return int(match.group(1)) - 1  # Make it 0-based
     return 0  # Fallback if no number is found
 
+
+import re
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+
+# Assumes these helpers/constants are defined elsewhere:
+#   - find_matching_columns(df, patterns)
+#   - get_column_index(column_name)
+#   - COLOR_PALETTE for non‑PCM traces
+
 def create_temperature_plots(dfs, uef_values, patterns=['T_WH', 'T_PCM']):
-    """Create temperature plots with static color palette for trace indices."""
+    """Create temperature plots with static colors plus distinct hues & opacities for each PCM layer & node."""
     all_figs = []
     figure_metadata = []
-    water_temp_cutoff = 43.3333  # 110 F
+    water_temp_cutoff = 43.3333  # 110 °F in °C
+
+    # Precompile PCM regex
+    pcm_regex_full = re.compile(r"T_PCM(\d+)-(\d+)-(\d+)-(\d+)")
 
     for i, (file, df) in enumerate(dfs.items()):
         uef = uef_values[i]
         column_groups = find_matching_columns(df, patterns)
 
-        # Extract additional parameters for title
-        pcm_mass_col = "PCM Mass (kg)"
-        pcm_h_col_pattern = re.compile(r"Water Tank PCM\d+ h \(W/m\^2K\)")
-        pcm_sa_col_pattern = re.compile(r"Water Tank PCM\d+ sa_ratio") 
-        if pcm_mass_col not in df.columns:
-            pcm_mass = 0.0
-        else:
-            pcm_mass = df[pcm_mass_col].iloc[-1]
-        matched_h_cols = next((col for col in df.columns if pcm_h_col_pattern.fullmatch(col)), None) 
-        match_sa_col = next((col for col in df.columns if pcm_sa_col_pattern.fullmatch(col)), None) 
-        pcm_h = df[matched_h_cols].iloc[-1] if matched_h_cols is not None else 0.0
-        pcm_sa = df[match_sa_col].iloc[-1] if match_sa_col is not None else 0.0
+        # Title parameters
+        pcm_mass = float(df.get("PCM Mass (kg)", pd.Series([0.0])).iloc[-1])
+        pcm_h_col = next((c for c in df.columns
+                          if re.fullmatch(r"Water Tank PCM\d+ h \(W/m\^2K\)", c)),
+                         None)
+        pcm_sa_col = next((c for c in df.columns
+                           if re.fullmatch(r"Water Tank PCM\d+ sa_ratio", c)),
+                          None)
+        pcm_h  = float(df[pcm_h_col].iloc[-1]) if pcm_h_col else 0.0
+        pcm_sa = float(df[pcm_sa_col].iloc[-1]) if pcm_sa_col else 0.0
+        
+        name_water_volume, isDefault = parse_tank_volume_from_name(file)
+        name_water_volume *= 0.9
 
-        water_volume_col = "Water Volume (L)"
-        L_TO_GAL_RATIO = 0.264172
-        if water_volume_col not in df.columns:
-            water_volume_gal = 50 * .9
-        else:
-            water_volume_gal = df[water_volume_col].iloc[-1] * L_TO_GAL_RATIO
+        water_volume_gal = df["Water Volume (L)"].iloc[0] * L_TO_GAL_RATIO if "Water Volume (L)" in df else name_water_volume
 
-        # Create a plot for each pattern
-        for pattern, columns in column_groups.items():
-            if not columns:
+        # Precompute per‑layer info for T_PCM
+        pcm_cols = column_groups.get('T_PCM', [])
+        if pcm_cols:
+            # unique layers
+            layers = sorted({
+                int(m.group(1))
+                for col in pcm_cols
+                if (m := pcm_regex_full.match(col))
+            })
+            # assign a distinct hue per layer
+            palette = px.colors.qualitative.Dark24
+            layer_colors = {
+                layer: palette[idx % len(palette)]
+                for idx, layer in enumerate(layers)
+            }
+            # find max index along each dimension for each layer
+            max_indices = {}
+            for layer in layers:
+                rad = [
+                    int(m.group(2))
+                    for col in pcm_cols
+                    if (m := pcm_regex_full.match(col)) and int(m.group(1)) == layer
+                ]
+                cir = [
+                    int(m.group(3))
+                    for col in pcm_cols
+                    if (m := pcm_regex_full.match(col)) and int(m.group(1)) == layer
+                ]
+                axi = [
+                    int(m.group(4))
+                    for col in pcm_cols
+                    if (m := pcm_regex_full.match(col)) and int(m.group(1)) == layer
+                ]
+                max_indices[layer] = {
+                    'radial':        max(rad) if rad else 1,
+                    'circumference': max(cir) if cir else 1,
+                    'axial':         max(axi) if axi else 1
+                }
+            dash_map = {
+                'radial':       'dash',
+                'circumference':'dot',
+                'axial':        'dashdot'
+            }
+
+        # One figure per pattern
+        for pattern, cols in column_groups.items():
+            if not cols:
                 continue
             fig = go.Figure()
 
-            # Determine the temperature range
-            temp_min = float('inf')
-            temp_max = float('-inf')
-            for col in columns:
-                temp_min = min(temp_min, df[col].min())
-                temp_max = max(temp_max, df[col].max())
-            temp_range = temp_max - temp_min
-            temp_padding = temp_range * 0.1
+            # y‑range + padding
+            tmin = min(df[c].min() for c in cols)
+            tmax = max(df[c].max() for c in cols)
+            pad  = (tmax - tmin) * 0.1
 
-            # Add temperature traces with static color assignment
-            for col in columns:
-                col_idx = get_column_index(col)
-                color = COLOR_PALETTE[col_idx % len(COLOR_PALETTE)]
+            for col in cols:
+                if pattern == 'T_PCM' and (m := pcm_regex_full.match(col)):
+                    layer, radial, circ, axial = map(int, m.groups())
+                    # base hex → RGB
+                    hexcol = layer_colors[layer].lstrip('#')
+                    r, g, b = int(hexcol[0:2], 16), int(hexcol[2:4], 16), int(hexcol[4:6], 16)
+                    # determine which dim varies
+                    if   radial > 1 and circ == 1 and axial == 1:
+                        dim, idx = 'radial', radial
+                    elif circ   > 1 and radial == 1 and axial == 1:
+                        dim, idx = 'circumference', circ
+                    elif axial  > 1 and radial == 1 and circ == 1:
+                        dim, idx = 'axial', axial
+                    else:
+                        dim, idx = None, 1
+
+                    # opacity from 1.0 (idx=1) down to 0.5 (idx=max)
+                    if dim:
+                        max_idx = max_indices[layer][dim]
+                        opacity = 1 - ((idx - 1) / max(max_idx - 1, 1) * 0.5)
+                        dash = dash_map[dim]
+                    else:
+                        opacity, dash = 1, 'solid'
+
+                    color = f'rgba({r},{g},{b},{opacity:.2f})'
+                    line_style = dict(color=color, dash=dash)
+
+                else:
+                    idx = get_column_index(col)
+                    color = COLOR_PALETTE[idx % len(COLOR_PALETTE)]
+                    line_style = dict(color=color)
+
                 fig.add_trace(
                     go.Scatter(
                         x=df['Time'],
                         y=df[col],
                         mode='lines',
                         name=col,
-                        line=dict(color=color)
+                        line=line_style
                     )
                 )
 
-            # [Rest of your overlay/annotation code here, unchanged]
+            # Overlays (unchanged)…
             if 'Water Heating Mode' in df.columns:
-                upper_regions = []
-                lower_regions = []
-                heat_pump_regions = []
-                mode_data = df['Water Heating Mode']
-                time_data = df['Time']
-
-                in_upper_segment = False
-                for j in range(len(mode_data)):
-                    mode_str = str(mode_data.iloc[j])
-                    if 'Upper On' in mode_str and not in_upper_segment:
-                        upper_segment_start = j
-                        in_upper_segment = True
-                    elif 'Upper On' not in mode_str and in_upper_segment:
-                        upper_segment_end = j
-                        in_upper_segment = False
-                        start_time = time_data.iloc[upper_segment_start]
-                        end_time = time_data.iloc[upper_segment_end]
-                        upper_regions.append((start_time, end_time))
-                if in_upper_segment:
-                    upper_segment_end = len(mode_data) - 1
-                    start_time = time_data.iloc[upper_segment_start]
-                    end_time = time_data.iloc[upper_segment_end]
-                    upper_regions.append((start_time, end_time))
-                in_lower_segment = False
-                for j in range(len(mode_data)):
-                    mode_str = str(mode_data.iloc[j])
-                    if 'Lower On' in mode_str and not in_lower_segment:
-                        lower_segment_start = j
-                        in_lower_segment = True
-                    elif 'Lower On' not in mode_str and in_lower_segment:
-                        lower_segment_end = j
-                        in_lower_segment = False
-                        start_time = time_data.iloc[lower_segment_start]
-                        end_time = time_data.iloc[lower_segment_end]
-                        lower_regions.append((start_time, end_time))
-                if in_lower_segment:
-                    lower_segment_end = len(mode_data) - 1
-                    start_time = time_data.iloc[lower_segment_start]
-                    end_time = time_data.iloc[lower_segment_end]
-                    lower_regions.append((start_time, end_time))
-                in_heat_pump_segment = False
-                for j in range(len(mode_data)):
-                    mode_str = str(mode_data.iloc[j])
-                    if 'Heat Pump On' in mode_str and not in_heat_pump_segment:
-                        heat_pump_segment_start = j
-                        in_heat_pump_segment = True
-                    elif 'Heat Pump On' not in mode_str and in_heat_pump_segment:
-                        heat_pump_segment_end = j
-                        in_heat_pump_segment = False
-                        start_time = time_data.iloc[heat_pump_segment_start]
-                        end_time = time_data.iloc[heat_pump_segment_end]
-                        heat_pump_regions.append((start_time, end_time))
-                if in_heat_pump_segment:
-                    heat_pump_segment_end = len(mode_data) - 1
-                    start_time = time_data.iloc[heat_pump_segment_start]
-                    end_time = time_data.iloc[heat_pump_segment_end]
-                    heat_pump_regions.append((start_time, end_time))
-
-                # Add overlays
-                for j, (start_time, end_time) in enumerate(upper_regions):
-                    fig.add_trace(
-                        go.Scatter(
-                            x=[start_time, end_time, end_time, start_time, start_time],
-                            y=[temp_min - temp_padding, temp_min - temp_padding,
-                               temp_max + temp_padding, temp_max + temp_padding,
-                               temp_min - temp_padding],
-                            fill="toself",
-                            fillcolor="rgba(255, 0, 0, 0.15)",
+                mode = df['Water Heating Mode'].astype(str)
+                times = df['Time']
+                def regions(key):
+                    R, in_seg = [], False
+                    for j, mstr in enumerate(mode):
+                        if key in mstr and not in_seg:
+                            start, in_seg = j, True
+                        elif key not in mstr and in_seg:
+                            R.append((times.iloc[start], times.iloc[j]))
+                            in_seg = False
+                    if in_seg:
+                        R.append((times.iloc[start], times.iloc[len(mode)-1]))
+                    return R
+                def add(R, name, clr, grp):
+                    for k, (t0, t1) in enumerate(R):
+                        fig.add_trace(go.Scatter(
+                            x=[t0, t1, t1, t0, t0],
+                            y=[tmin-pad]*2 + [tmax+pad]*2 + [tmin-pad],
+                            fill='toself',
+                            fillcolor=clr,
                             line=dict(width=0),
-                            mode="none",
-                            name="Upper Element On" if j == 0 else "",
-                            showlegend=True if j == 0 else False,
-                            legendgroup="upper_elements",
-                            hoverinfo="skip"
-                        )
-                    )
-                for j, (start_time, end_time) in enumerate(lower_regions):
-                    fig.add_trace(
-                        go.Scatter(
-                            x=[start_time, end_time, end_time, start_time, start_time],
-                            y=[temp_min - temp_padding, temp_min - temp_padding,
-                               temp_max + temp_padding, temp_max + temp_padding,
-                               temp_min - temp_padding],
-                            fill="toself",
-                            fillcolor="rgba(0, 0, 255, 0.15)",
-                            line=dict(width=0),
-                            mode="none",
-                            name="Lower Element On" if j == 0 else "",
-                            showlegend=True if j == 0 else False,
-                            legendgroup="lower_elements",
-                            hoverinfo="skip"
-                        )
-                    )
-                for j, (start_time, end_time) in enumerate(heat_pump_regions):
-                    fig.add_trace(
-                        go.Scatter(
-                            x=[start_time, end_time, end_time, start_time, start_time],
-                            y=[temp_min - temp_padding, temp_min - temp_padding,
-                               temp_max + temp_padding, temp_max + temp_padding,
-                               temp_min - temp_padding],
-                            fill="toself",
-                            fillcolor="rgba(0, 255, 0, 0.15)",
-                            line=dict(width=0),
-                            mode="none",
-                            name="Heat Pump On" if j == 0 else "",
-                            showlegend=True if j == 0 else False,
-                            legendgroup="heat_pump",
-                            hoverinfo="skip"
-                        )
-                    )
+                            mode='none',
+                            name=name if k==0 else None,
+                            showlegend=(k==0),
+                            legendgroup=grp,
+                            hoverinfo='skip'
+                        ))
+                add(regions('Upper On'),     "Upper Element On",    "rgba(255,0,0,0.15)", "upper")
+                add(regions('Lower On'),     "Lower Element On",    "rgba(0,0,255,0.15)", "lower")
+                add(regions('Heat Pump On'), "Heat Pump On",        "rgba(0,255,0,0.15)", "heat_pump")
 
+            # Cutoff line & annotation
+            fig.add_shape(
+                type='line', xref='paper', x0=0, x1=1,
+                yref='y', y0=water_temp_cutoff, y1=water_temp_cutoff,
+                line=dict(color='red', width=1, dash='dash')
+            )
+            fig.add_annotation(
+                xref='paper', x=1, y=water_temp_cutoff,
+                xanchor='right', yanchor='bottom',
+                text='110 °F Cutoff Temp', showarrow=False
+            )
+
+            # Layout
             fig.update_layout(
-                title=f'{pattern} Temperatures - {file}<br>'
-                      f'UEF: {uef:.3f} | PCM h: {pcm_h:.2f} W/m^2K | PCM SA Ratio: {pcm_sa:.2f} | PCM Mass: {pcm_mass:.3f} kg | '
-                      f'Water Volume: {water_volume_gal:.1f} gal',
+                title=(
+                    f"{pattern} Temperatures – {file}<br>"
+                    f"UEF: {uef:.3f} | PCM h: {pcm_h:.2f} W/m²K | "
+                    f"PCM SA: {pcm_sa:.2f} | PCM Mass: {pcm_mass:.3f} kg | "
+                    f"Water Volume: {water_volume_gal:.1f} gal"
+                ),
                 xaxis_title='Time',
                 yaxis_title='Temperature (°C)',
                 height=600,
                 showlegend=True
             )
-            fig.update_yaxes(range=[temp_min - temp_padding, temp_max + temp_padding])
-
-            # pick your index window
-            # start_idx = 1200
-            # end_idx   = 1280
-            # draw_end_idx = 1230
-            # t0 = df['Time'].iloc[start_idx]
-            # t1 = df['Time'].iloc[end_idx]
-            # t_draw_end = df['Time'].iloc[draw_end_idx]
-            # fig.update_xaxes(range=[t0, t1])
-
-            fig.add_shape(
-                type="line",
-                xref="paper", x0=0, x1=1,
-                yref="y",     y0=water_temp_cutoff, y1=water_temp_cutoff,
-                line=dict(color="red", width=1, dash="dash")
-            )
-            fig.add_annotation(
-                xref="paper", x=1, 
-                y=water_temp_cutoff,
-                xanchor="right", yanchor="bottom",
-                text="110 °F Cutoff Temp",
-                showarrow=False
-            )
+            fig.update_yaxes(range=[tmin - pad, tmax + pad])
 
             figure_metadata.append({
                 'pattern': pattern,
                 'file': file,
                 'type': 'temperature_pattern'
             })
-
             all_figs.append(fig)
 
     return all_figs, figure_metadata
@@ -1572,7 +1590,7 @@ def create_water_flow_temperature_plots(dfs, uef_values, outlet_gpm=3):
                 yaxis='y2'
             )
         )
-
+        
         # Add temperature traces
         fig.add_trace(
             go.Scatter(
@@ -1958,7 +1976,7 @@ def create_capacitance_plots(dfs, uef_values):
             
         water_volume_col = "Water Volume (L)"
         if water_volume_col not in df.columns:
-            water_volume_gal = 45.0
+            water_volume_gal, isDefault = parse_tank_volume_from_name(file)
         else:
             water_volume_gal = df[water_volume_col].iloc[-1] * L_TO_GAL_RATIO
             
@@ -2097,43 +2115,64 @@ def calculate_net_water_energy(volume, temperature, temperature_difference):
     
     return water_weight * temperature_difference * 4184 # J
 
+def parse_tank_volume_from_name(filename):
+    """
+    Parses a filename to extract tank volume in gallons.
+    Returns a tuple: (volume_in_gal, is_default)
+    """
+    is_default = "zDefault" in filename
+    match = re.search(r'_([0-9]+(?:\.[0-9]+)?)gal_', filename)
+    volume = float(match.group(1)) if match else None
+    return volume, is_default
+
 def calculate_uef(dfs):
     # calculate UEF of the water tank
     uef_values = []      # make sure in W*min                            
     
-    for df in dfs.values():
-        uef = calculate_single_uef(df)
+    for name, df in dfs.items():
+        uef = calculate_single_uef(df, name)
         uef_values.append(uef)
     
     return uef_values
 
-def calculate_single_uef(df):
+def calculate_single_uef(df, name):
     # calculate UEF of the water tank
-    Q_cons = (
-        df["Water Heating Electric Power (kW)"].sum() * 1000
-    )  # not sure if this is the correct term that I should be pulling
-    Q_load = df[
-        "Hot Water Delivered (W)"
-    ].sum()  # not sure if this is the correct term that I should be pulling
+    # integrate the total energy output and consumped
+    df['Time'] = pd.to_datetime(df['Time'])
+    df = df.sort_values('Time')  # ensure chronological order
+    df['dt_s'] = df['Time'].diff().dt.total_seconds().fillna(0)
+
+    # Electric heating energy (from kW to W, then multiply by seconds)
+    Q_cons = ((df["Water Heating Electric Power (kW)"] * 1000) * df['dt_s']).sum()
+
+    # Hot water delivered energy (already in W, multiply by seconds)
+    Q_load = (df["Hot Water Delivered (W)"] * df['dt_s']).sum()
     
-    PCM_Q_Heat_to_Water= calculate_net_PCM_heat(df)     # make sure in W*min
+    
+    PCM_Q_Heat_to_Water= calculate_net_PCM_heat(df)
     PCM_net_enthalpy = calculate_net_PCM_enthalpy(df)                               
-    PCM_net_heat_loss = PCM_net_enthalpy / 60           # make sure in W*min
+    PCM_net_heat_loss = PCM_net_enthalpy
     water_net_temp_delta = calculate_net_water_temp(df)
     
     water_volume_col = "Water Volume (L)"
     if water_volume_col not in df.columns:
+        tank_volume, is_default_case = parse_tank_volume_from_name(name)
+        tank_volume *= 0.9
+        tank_volume_L = tank_volume / L_TO_GAL_RATIO
         
-        Q_cons_total = Q_cons - PCM_net_heat_loss           # make sure in W*min
+        water_net_energy = calculate_net_water_energy(tank_volume_L, df['Hot Water Average Temperature (C)'].iloc[-1], water_net_temp_delta)
+        Q_load_total = Q_load
+        Q_cons_adjusted = Q_cons - PCM_net_heat_loss - water_net_energy
         # water_net_energy = calculate_net_water_energy(102.2, df['Hot Water Average Temperature (C)'].iloc[-1], water_net_temp_delta) / 60                            
         # UEF = Q_load / Q_cons_total
-        UEF = Q_load / Q_cons
+        UEF = Q_load_total / Q_cons_adjusted
     else:
         water_volume = df[water_volume_col].iloc[-1]
-        water_net_energy = calculate_net_water_energy(water_volume, df['Hot Water Average Temperature (C)'].iloc[-1], water_net_temp_delta) / 60 # make sure in W*min
-        Q_cons_total = Q_cons - PCM_net_heat_loss - water_net_energy          # make sure in W*min                            
+        water_net_energy = calculate_net_water_energy(water_volume, df['Hot Water Average Temperature (C)'].iloc[-1], water_net_temp_delta)
+        Q_load_total = Q_load
+        Q_cons_adjusted = Q_cons - PCM_net_heat_loss - water_net_energy# make sure in W*min                            
         # UEF = Q_load / Q_cons_total
-        UEF = Q_load / Q_cons
+        UEF = Q_load_total / Q_cons_adjusted
         
     
     return UEF
@@ -2631,89 +2670,75 @@ def plot_energy_comparison(dfs, energy_sums):
     
     return fig, {'type': 'energy_comparison'}
 
-def plot_pcm_enthalpies(profiles, names=None):
+
+
+def _label_from_filename(fname):
+    m = re.search(r'_([0-9]{2,3})F', fname)
+    return f"{m.group(1)}°F" if m else fname
+
+def _label_from_filename(fname):
+    m = re.search(r'_([0-9]{2,3})F', fname)
+    return f"{m.group(1)}°F" if m else fname
+
+def pcm_enthalpy_integral_bar(profiles, filenames=None, T_low_F=110, T_high_F=125):
     """
-    Plot cp and Enthalpy vs Temperature for multiple PCM profiles on the same plot,
-    using solid lines for cp and dashed lines for enthalpy, with distinct colors per PCM.
+    Compute integral of enthalpy over [T_low_F, T_high_F]°F for each PCM profile
+    and return a Plotly bar chart plus the raw integrals dict.
 
     Args:
-        profiles (list of np.ndarray): Each entry is an array with columns
-                                       [Temp (C), cp (J/g-C), Enthalpy (J/kg)].
-        names (list of str, optional): Labels for each PCM. Defaults to ['PCM 1', 'PCM 2', …].
+        profiles (list of np.ndarray): Each array with columns [Temp (°C), cp, Enthalpy (J/kg)].
+        filenames (list of str], optional): Used to label bars by extracting _XXXF.
+        T_low_F (float): Lower Fahrenheit bound.
+        T_high_F (float): Upper Fahrenheit bound.
 
     Returns:
-        go.Figure: Plotly figure object.
+        fig: Plotly bar figure.
+        integrals: dict label -> integral value (J/kg * °C).
     """
-    fig = go.Figure()
-    colors = px.colors.qualitative.Plotly
-    n = len(profiles)
-    if names is None:
-        names = [f'PCM {i+1}' for i in range(n)]
-        
-    for i, df in enumerate(profiles):
-        color = colors[i % len(colors)]
-        label = names[i]
-        # cp curve: solid line, no markers
-        fig.add_trace(go.Scatter(
-            x=df[:, 0],
-            y=df[:, 1],
-            name=f'{label} cp',
-            mode='lines',
-            line=dict(color=color, dash='solid'),
-            yaxis='y1'
-        ))
-        # enthalpy curve: dashed line, no markers
-        fig.add_trace(go.Scatter(
-            x=df[:, 0],
-            y=df[:, 2],
-            name=f'{label} enthalpy',
-            mode='lines',
-            line=dict(color=color, dash='dash'),
-            yaxis='y2'
-        ))
-        
-        # add vertical line at 125 F
-        # compute full cp‑axis range
-        all_cp = np.hstack([df[:,1] for df in profiles])
-        cp_min, cp_max = all_cp.min(), all_cp.max()
+    T_low_C = (T_low_F - 32) / 1.8
+    T_high_C = (T_high_F - 32) / 1.8
 
-        setpoint_C = (125 - 32) / 1.8  # 125 °F in °C
-        setpoint_C2 = (110 -32) / 1.8  # 110 °F in °C
-        
-        fig.add_trace(go.Scatter(
-            x=[setpoint_C, setpoint_C],
-            y=[cp_min,   cp_max],
-            mode='lines',
-            line=dict(color='red', dash='solid'),
-            name='125°F Setpoint',
-            showlegend=True
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=[setpoint_C2, setpoint_C2],
-            y=[cp_min,   cp_max],
-            mode='lines',
-            line=dict(color='red', dash='dash'),
-            name='110°F Cutoff Temp',
-            showlegend=True
-        ))
+    labels = []
+    if filenames:
+        labels = [_label_from_filename(f) for f in filenames]
+    else:
+        labels = [f'PCM {i+1}' for i in range(len(profiles))]
+    # pad/truncate
+    if len(labels) < len(profiles):
+        labels += [f'PCM {i+1}' for i in range(len(labels), len(profiles))]
+    labels = labels[: len(profiles)]
 
+    integrals = {}
+    values = []
+    for label, df in zip(labels, profiles):
+        temp_C = df[:, 0]
+        enthalpy = df[:, 1]
+        mask = (temp_C >= T_low_C) & (temp_C <= T_high_C)
+        x_sel = temp_C[mask]
+        y_sel = enthalpy[mask]
+        if len(x_sel) == 0:
+            integral = 0.0
+        else:
+            if not np.isclose(x_sel[0], T_low_C):
+                y_low = np.interp(T_low_C, temp_C, enthalpy)
+                x_sel = np.insert(x_sel, 0, T_low_C)
+                y_sel = np.insert(y_sel, 0, y_low)
+            if not np.isclose(x_sel[-1], T_high_C):
+                y_high = np.interp(T_high_C, temp_C, enthalpy)
+                x_sel = np.append(x_sel, T_high_C)
+                y_sel = np.append(y_sel, y_high)
+            integral = np.trapz(y_sel, x_sel)
+        integrals[label] = integral
+        values.append(integral)
+
+    fig = go.Figure(go.Bar(x=list(integrals.keys()), y=values))
     fig.update_layout(
-        title='PCM cp and Enthalpy vs Temperature',
-        xaxis=dict(title='Temperature (°C)'),
-        yaxis=dict(title='cp (J/g-°C)', showgrid=False),
-        yaxis2=dict(
-            title='Enthalpy (J/kg)',
-            overlaying='y',
-            side='right',
-            showgrid=False
-        ),
-        # legend=dict(x=0.05, y=0.95),
-        height=600
+        title=f'Enthalpy Integral over {T_low_F}–{T_high_F}°F',
+        xaxis=dict(title='PCM (from filename or autogenerated)'),
+        yaxis=dict(title='∫ Enthalpy dT (J/kg·°C)'),
+        height=500
     )
-    return fig
-
-
+    return fig, integrals
 
 # ANSI color codes
 RESET = "\033[0m"
@@ -2895,18 +2920,18 @@ if __name__ == "__main__":
     dfs  = load_data(results_folder=graphing_results_folder)
     print(f"Data loading time: {time.perf_counter() - _start_time:.2f} seconds")
     
-    # _uef_time = time.perf_counter()
-    # uef = calculate_uef(dfs)
-    # print(f"UEF calculation time: {time.perf_counter() - _uef_time:.2f} seconds")
+    _uef_time = time.perf_counter()
+    uef = calculate_uef(dfs)
+    print(f"UEF calculation time: {time.perf_counter() - _uef_time:.2f} seconds")
 
-    # _pool_time = time.perf_counter()
-    # all_plots = parallel_create_temperature_plots(dfs, uef_values=uef, patterns=['T_WH', 'T_PCM'])
-    # print(f"Temp chart processing pool time: {time.perf_counter() - _pool_time:.2f} seconds")
+    _pool_time = time.perf_counter()
+    all_plots = parallel_create_temperature_plots(dfs, uef_values=uef, patterns=['T_WH', 'T_PCM'])
+    print(f"Temp chart processing pool time: {time.perf_counter() - _pool_time:.2f} seconds")
     
-    # # # # # Display all plots
-    # _plot_time = time.perf_counter()
-    # parallel_display_plots(all_plots, stagger_delay=0.1)  # 0.1 second delay between plots
-    # print(f"Temp chart display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # # # # Display all plots
+    _plot_time = time.perf_counter()
+    parallel_display_plots(all_plots, stagger_delay=0.1)  # 0.1 second delay between plots
+    print(f"Temp chart display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
     # _plot_time = time.perf_counter()
     # all_plots = parallel_create_energy_output_plots(dfs, uef_values=uef, patterns=['T_WH', 'T_PCM'])
@@ -2925,7 +2950,7 @@ if __name__ == "__main__":
 
     # # Draw data summary
     _hot_water_delivered_pool_time = time.perf_counter()
-    output = parallel_calculate_hot_water_delivered(dfs)
+    output = calculate_hot_water_delivered(dfs, first_hour_test=True)
     print(f"Hot water delivered pool time: {time.perf_counter() - _hot_water_delivered_pool_time:.2f} seconds")
     
     # _hot_water_plot_time = time.perf_counter()
@@ -2939,16 +2964,17 @@ if __name__ == "__main__":
     # draw 2d matrix plot
     # plot_comparison(dfs, output)
     
-    # pcms = [np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "Models", f"cp_h-T_data_shifted_{i}F.csv"), delimiter=",", skiprows=1) for i in range(110, 142, 2)]
-    pcms = [np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "Models", "cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1)]
-    pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "Models", "90-cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
-    pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "Models", "60-40_PCM55-TPU_cp-h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
+    pcms = []
+    pcms = [np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", f"90%_cp_h-T_data_shifted_{i}F.csv"), delimiter=",", skiprows=1) for i in range(110, 142, 1)]
+    # pcms = [np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", "cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1)]
+    pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", "90-cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
+    # pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", "60-40_PCM55-TPU_cp-h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
     
-    # pcms_names = [f'90% Infiltrated Graphite PCM {i}F' for i in range(110, 142, 2)]
-    pcms_names = ['Bulk PCM', '90% Graphite infiltrated PCM', '60-40 PCM polymer mix PCM 120F'] 
+    pcms_names = [f'90% Infiltrated Graphite PCM {i}F' for i in range(110, 142, 1)]
+    # pcms_names = ['90% Graphite infiltrated PCM'] 
     
-    fig = plot_pcm_enthalpies(pcms, pcms_names)
-    fig.show()
+    # fig, integral = pcm_enthalpy_integral_bar(pcms, pcms_names)
+    # fig.show()
     
     print(f"{BOLD}{GREEN}All Plots created in {time.perf_counter() - _start_time_plot_results:.2f} seconds{RESET}")
     
