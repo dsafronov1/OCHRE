@@ -82,7 +82,7 @@ h_values = [5000]
 # sa_ratios = np.linspace(1, 16, num_points)
 
 # case 3
-sa_ratios = np.linspace(4, 44, num_points)
+sa_ratios = np.linspace(1, 50, num_points)
 
 # h_values = np.linspace(np.log10(50), np.log10(5000), num_points)
 h_values = np.linspace(50, 5000, num_points)
@@ -93,9 +93,9 @@ h_values = np.linspace(50, 5000, num_points)
 simulation_duration_days = 220
 
 # pcm_file_names = ['cp_h-T_data_shifted_120F.csv']
-# pcm_file_names = ['60-40_PCM55-TPU_cp-h-T.csv']
+pcm_file_names = ['60-40_PCM55-TPU_cp-h-T.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_88frac.csv']
-pcm_file_names = ['ct53-resin_h-T_data_45frac.csv']
+# pcm_file_names = ['ct53-resin_h-T_data_45frac.csv']
 
 setpoint_temps_f = [140]
 # setpoint_temps_f = [125, 140]
@@ -107,12 +107,12 @@ setpoint_temps_c = [
 tank_volume_gal = [40]
 
 
-vol_fract = 0.00000001  # 1.540e-06 kg
-vol_fract = 0.0001  # 1.540e-02 kg
-vol_fract = 0.5  # 7.700e+01 kg
-# vol_fracs = [0.66]
+# vol_fract = 0.00000001  # 1.540e-06 kg
+# vol_fract = 0.0001  # 1.540e-02 kg
+# vol_fract = 0.5  # 7.700e+01 kg
+vol_fracs = [0.66]
 # vol_fracs = [0.74]
-vol_fracs = [0.26]
+# vol_fracs = [0.26]
 # vol_fracs = [0.5]
 
 # pcm_vol_fractions = [{i: vol_fract for i in range(1, n + 1)} for n in range(1, num_nodes + 1)]
@@ -694,8 +694,8 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
         "HPWH COP (-)": 4.5,
         "duration": duration,
         **default_args,
-        # "time_res": dt.timedelta(minutes=1),
-        "time_res": dt.timedelta(seconds=0.5),
+        "time_res": dt.timedelta(minutes=1),
+        # "time_res": dt.timedelta(seconds=0.5),
         "hp_only_mode": True
     }
 

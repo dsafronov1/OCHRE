@@ -14,8 +14,8 @@ import numpy as np
 import colorsys
 from concurrent.futures import ThreadPoolExecutor
 
+
 from calculate_hot_water_delivered import calculate_hot_water_delivered
-from ochre.utils.units import Q_
 
 
 L_TO_GAL_RATIO = 0.264172
@@ -327,23 +327,67 @@ def plot_draw_event_summary(draw_outputs, plot_energy=False):
     
     
     
+def _extract_gallons(fname: str):
+    """
+    Extract the last 'NNgal' token near the end of the filename.
+    Supports endings like: ..._40gal.csv, ..._40gal_1, ...-40gal
+    """
+    m = None
+    for match in re.finditer(r'(\d+)\s*gal(?=[\._\-]|$)', fname, flags=re.IGNORECASE):
+        m = match
+    return int(m.group(1)) if m else None
+
+def _extract_heatpump_thickness(fname: str):
+    """
+    Prefer 'Heatpump_thickness-N.NN' token; if missing, fall back to the first 'thickness-N.NN'.
+    """
+    m = re.search(r'Heatpump_thickness-([0-9]*\.?[0-9]+)', fname, flags=re.IGNORECASE)
+    if not m:
+        m = re.search(r'\bthickness-([0-9]*\.?[0-9]+)', fname, flags=re.IGNORECASE)
+    return float(m.group(1)) if m else float('inf')
+
+def _sort_key(fname: str):
+    """
+    Sorting strategy:
+      Group 0 = zDefault (sorted by gallons ascending)
+      Group 1 = others   (sorted by Heatpump_thickness ascending, then gallons, then name)
+    """
+    is_default = "zDefault" in fname
+    gal = _extract_gallons(fname)
+    thk = _extract_heatpump_thickness(fname)
+    if is_default:
+        return (0, 10**9 if gal is None else gal, 0.0)
+    else:
+        return (1, thk, 10**9 if gal is None else gal, fname.lower())
+
 def plot_draw_events(draw_outputs):
     """
     For each file, create grouped bar charts of draw events.
-    zDefault files get black bars; all others use the default color cycle.
-    Also adds a draw count number for each event group.
+    Legend order requirement:
+      - All legends for the TOP chart first (Water Volume), then all legends for the BOTTOM chart (Heat Delivered).
+      - Within each chart:
+          • zDefault first, sorted by tail gallons (e.g., 40gal, 50gal, 65gal)
+          • then others, sorted by Heatpump_thickness ascending
+    zDefault files use black bars; others use default color cycle.
+    Also adds a draw-count number above each event group.
     """
-    from plotly.subplots import make_subplots
-    import plotly.graph_objects as go
+    # Canonical file order
+    files_sorted = sorted(draw_outputs.keys(), key=_sort_key)
 
-    # Find max number of events and labels
+    # Determine legend rank offsets so top chart legends appear before bottom chart legends
+    # (Avoid interleaving by giving bottom traces a large base offset.)
+    TOP_LEGEND_BASE = 0
+    BOTTOM_LEGEND_BASE = 10_000
+
+    # Max number of events and labels
     max_events = max(len(m['draw_events']) for m in draw_outputs.values())
     event_numbers = [f"Event {i+1}" for i in range(max_events)]
 
-    # Prepare water and heat data
+    # Prepare water and heat data in sorted order
     water_data = {}
     heat_data = {}
-    for fname, metrics in draw_outputs.items():
+    for fname in files_sorted:
+        metrics = draw_outputs[fname]
         vols, heats = [], []
         for i in range(max_events):
             if i < len(metrics['draw_events']):
@@ -363,92 +407,143 @@ def plot_draw_events(draw_outputs):
         shared_xaxes=True
     )
 
-    # Add traces
-    for row, data_dict, fmt in [
-        (1, water_data, "{:.2f}"),
-        (2, heat_data, "{:.3f}")
-    ]:
-        for fname, vals in data_dict.items():
-            params = dict(
-                name=fname,
-                x=event_numbers,
-                y=vals,
-                text=[fmt.format(v) if v is not None else "" for v in vals],
-                textposition='auto'
-            )
-            if "zDefault" in fname:
-                params["marker_color"] = "black"
-            fig.add_trace(go.Bar(**params), row=row, col=1)
+    # ---- Row 1: Water Volume ----
+    for rank, fname in enumerate(files_sorted):
+        vals = water_data[fname]
+        is_default = "zDefault" in fname
+        gal = _extract_gallons(fname)
+        label = f"{gal}gal" if is_default and gal is not None else fname
+        params = dict(
+            name=label,
+            legendrank=TOP_LEGEND_BASE + rank,
+            legendgroup="water",
+            x=event_numbers,
+            y=vals,
+            text=[f"{v:.2f}" if v is not None else "" for v in vals],
+            textposition='auto'
+        )
+        if is_default:
+            params["marker_color"] = "black"
+        bar = go.Bar(**params)
+        # Give the first trace in the group a group title
+        if rank == 0:
+            bar.legendgrouptitle = dict(text="Water Volume")
+        fig.add_trace(bar, row=1, col=1)
 
     # Add draw count number above each group in first row
     for i, label in enumerate(event_numbers):
+        col_max = max([v[i] for v in water_data.values() if v[i] is not None], default=0)
         fig.add_annotation(
             x=label,
-            y=max([v[i] for v in water_data.values() if v[i] is not None]) * 1.05,
+            y=col_max * 1.05 if col_max else 0,
             text=str(i + 1),
             showarrow=False,
             font=dict(size=12, color="red"),
             row=1, col=1
         )
 
+    # ---- Row 2: Heat Delivered ----
+    for rank, fname in enumerate(files_sorted):
+        val_list = heat_data[fname]
+        is_default = "zDefault" in fname
+        gal = _extract_gallons(fname)
+        label = f"{gal}gal" if is_default and gal is not None else fname
+        params = dict(
+            name=label,
+            legendrank=BOTTOM_LEGEND_BASE + rank,  # ensure all heat legends come after water legends
+            legendgroup="heat",
+            x=event_numbers,
+            y=val_list,
+            text=[f"{v:.3f}" if v is not None else "" for v in val_list],
+            textposition='auto'
+        )
+        if is_default:
+            params["marker_color"] = "black"
+        bar = go.Bar(**params)
+        if rank == 0:
+            bar.legendgrouptitle = dict(text="Heat Delivered")
+        fig.add_trace(bar, row=2, col=1)
+
     fig.update_layout(
         barmode='group',
         title_text="Draw Events Grouped by Event Number Across Files",
-        xaxis_title="Draw Event"
+        xaxis_title="Draw Event",
+        showlegend=True
     )
     fig.show()
-
 
 
 def plot_totals(draw_outputs):
     """
     For each file, plot:
-      • Total Water Volume (gal)
-      • Total Heat Delivered (kWh)
-    zDefault files get black bars; all others use the default color cycle.
+      • Total Water Volume (gal)  (top chart)
+      • Total Heat Delivered (kWh) (bottom chart)
+    Legend order requirement:
+      - All legends for the TOP chart first, then all legends for the BOTTOM chart.
+      - Within each chart:
+          • zDefault first, sorted by gallons ascending
+          • then others, sorted by Heatpump_thickness ascending
+    zDefault files use black bars; others use default color cycle.
     """
-    # extract filenames and metrics
-    files = list(draw_outputs.keys())
-    water_totals = [round(m['total_water_volume_gal'], 2) for m in draw_outputs.values()]
-    heat_totals  = [round(m['total_heat_delivered_kWh'], 3) for m in draw_outputs.values()]
+    files_sorted = sorted(draw_outputs.keys(), key=_sort_key)
+    TOP_LEGEND_BASE = 0
+    BOTTOM_LEGEND_BASE = 10_000
 
-    # set up two-row subplot
+    water_totals = [round(draw_outputs[f]['total_water_volume_gal'], 2) for f in files_sorted]
+    heat_totals  = [round(draw_outputs[f]['total_heat_delivered_kWh'], 3) for f in files_sorted]
+
     fig = make_subplots(
         rows=2, cols=1,
         subplot_titles=("Total Water Volume (gal)", "Total Heat Delivered (kWh)"),
         shared_xaxes=True
     )
 
-    # row 1: water
-    for fname, val in zip(files, water_totals):
+    # Row 1: water totals
+    for rank, (fname, val) in enumerate(zip(files_sorted, water_totals)):
+        is_default = "zDefault" in fname
+        gal = _extract_gallons(fname)
+        label = f"{gal}gal" if is_default and gal is not None else fname
         params = dict(
-            name=fname,
+            name=label,
+            legendrank=TOP_LEGEND_BASE + rank,
+            legendgroup="water_total",
             x=[fname],
             y=[val],
             text=[f"{val:.2f}"],
             textposition='auto'
         )
-        if "zDefault" in fname:
+        if is_default:
             params["marker_color"] = "black"
-        fig.add_trace(go.Bar(**params), row=1, col=1)
+        bar = go.Bar(**params)
+        if rank == 0:
+            bar.legendgrouptitle = dict(text="Total Water Volume")
+        fig.add_trace(bar, row=1, col=1)
 
-    # row 2: heat
-    for fname, val in zip(files, heat_totals):
+    # Row 2: heat totals
+    for rank, (fname, val) in enumerate(zip(files_sorted, heat_totals)):
+        is_default = "zDefault" in fname
+        gal = _extract_gallons(fname)
+        label = f"{gal}gal" if is_default and gal is not None else fname
         params = dict(
-            name=fname,
+            name=label,
+            legendrank=BOTTOM_LEGEND_BASE + rank,
+            legendgroup="heat_total",
             x=[fname],
             y=[val],
             text=[f"{val:.3f}"],
             textposition='auto'
         )
-        if "zDefault" in fname:
+        if is_default:
             params["marker_color"] = "black"
-        fig.add_trace(go.Bar(**params), row=2, col=1)
+        bar = go.Bar(**params)
+        if rank == 0:
+            bar.legendgrouptitle = dict(text="Total Heat Delivered")
+        fig.add_trace(bar, row=2, col=1)
 
-    # layout tweaks
     fig.update_layout(
         barmode='group',
         title_text="Total Metrics by File",
+        showlegend=True
     )
     fig.update_xaxes(showticklabels=False)
     fig.show()
@@ -2136,46 +2231,73 @@ def calculate_uef(dfs):
     return uef_values
 
 def calculate_single_uef(df, name):
-    # calculate UEF of the water tank
-    # integrate the total energy output and consumped
-    df['Time'] = pd.to_datetime(df['Time'])
-    df = df.sort_values('Time')  # ensure chronological order
-    df['dt_s'] = df['Time'].diff().dt.total_seconds().fillna(0)
+    """
+    Calculates two UEF values:
+      - 'uef_all': UEF over the entire dataframe
+      - 'uef_last_day': UEF using only rows from the last calendar day present in df['Time']
+    Returns a dict: {'uef_all': float|np.nan, 'uef_last_day': float|np.nan}
+    """
+    import pandas as pd
+    import numpy as np
 
-    # Electric heating energy (from kW to W, then multiply by seconds)
-    Q_cons = ((df["Water Heating Electric Power (kW)"] * 1000) * df['dt_s']).sum()
+    def _compute_uef_for_df(local_df: pd.DataFrame) -> float:
+        if local_df.empty:
+            return np.nan
 
-    # Hot water delivered energy (already in W, multiply by seconds)
-    Q_load = (df["Hot Water Delivered (W)"] * df['dt_s']).sum()
-    
-    
-    PCM_Q_Heat_to_Water= calculate_net_PCM_heat(df)
-    PCM_net_enthalpy = calculate_net_PCM_enthalpy(df)                               
-    PCM_net_heat_loss = PCM_net_enthalpy
-    water_net_temp_delta = calculate_net_water_temp(df)
-    
-    water_volume_col = "Water Volume (L)"
-    if water_volume_col not in df.columns:
-        tank_volume, is_default_case = parse_tank_volume_from_name(name)
-        tank_volume *= 0.9
-        tank_volume_L = tank_volume / L_TO_GAL_RATIO
-        
-        water_net_energy = calculate_net_water_energy(tank_volume_L, df['Hot Water Average Temperature (C)'].iloc[-1], water_net_temp_delta)
-        Q_load_total = Q_load
+        local = local_df.copy()
+        local['Time'] = pd.to_datetime(local['Time'])
+        local = local.sort_values('Time')
+        local['dt_s'] = local['Time'].diff().dt.total_seconds().fillna(0)
+
+        # Electric heating energy (kW → W, then multiply by seconds)
+        Q_cons = ((local["Water Heating Electric Power (kW)"] * 1000) * local['dt_s']).sum()
+
+        # Hot water delivered energy (already W, multiply by seconds)
+        Q_load = (local["Hot Water Delivered (W)"] * local['dt_s']).sum()
+
+        # PCM and water state adjustments (based on your existing helpers)
+        PCM_Q_Heat_to_Water = calculate_net_PCM_heat(local)  # kept for parity; not directly used below
+        PCM_net_enthalpy = calculate_net_PCM_enthalpy(local)
+        PCM_net_heat_loss = PCM_net_enthalpy
+        water_net_temp_delta = calculate_net_water_temp(local)
+
+        water_volume_col = "Water Volume (L)"
+        if water_volume_col in local.columns:
+            water_volume_L = local[water_volume_col].iloc[-1]
+        else:
+            tank_volume, _is_default_case = parse_tank_volume_from_name(name)
+            tank_volume *= 0.9  # effective water fraction
+            water_volume_L = tank_volume / L_TO_GAL_RATIO
+
+        # Net energy to change bulk water temperature over the window
+        water_net_energy = calculate_net_water_energy(
+            water_volume_L,
+            local['Hot Water Average Temperature (C)'].iloc[-1],
+            water_net_temp_delta
+        )
+
         Q_cons_adjusted = Q_cons - PCM_net_heat_loss - water_net_energy
-        # water_net_energy = calculate_net_water_energy(102.2, df['Hot Water Average Temperature (C)'].iloc[-1], water_net_temp_delta) / 60                            
-        # UEF = Q_load / Q_cons_total
-        UEF = Q_load_total / Q_cons_adjusted
+        if not np.isfinite(Q_cons_adjusted) or Q_cons_adjusted == 0:
+            return np.nan
+
+        return Q_load / Q_cons_adjusted
+
+    # ---- Whole-dataset UEF ----
+    df_all = df.copy()
+    df_all['Time'] = pd.to_datetime(df_all['Time'])
+    df_all = df_all.sort_values('Time')
+    uef_all = _compute_uef_for_df(df_all)
+
+    # ---- Last calendar day UEF ----
+    if df_all.empty:
+        uef_last_day = np.nan
     else:
-        water_volume = df[water_volume_col].iloc[-1]
-        water_net_energy = calculate_net_water_energy(water_volume, df['Hot Water Average Temperature (C)'].iloc[-1], water_net_temp_delta)
-        Q_load_total = Q_load
-        Q_cons_adjusted = Q_cons - PCM_net_heat_loss - water_net_energy# make sure in W*min                            
-        # UEF = Q_load / Q_cons_total
-        UEF = Q_load_total / Q_cons_adjusted
-        
-    
-    return UEF
+        last_day = df_all['Time'].max().normalize()  # calendar day of the last timestamp
+        df_last_day = df_all[df_all['Time'].dt.normalize() == last_day]
+        # Recompute on the sliced day to get correct dt_s within the day
+        uef_last_day = _compute_uef_for_df(df_last_day)
+
+    return {"uef_all": uef_all, "uef_last_day": uef_last_day}
 
 def calculate_net_PCM_heat(df):
 
@@ -2612,6 +2734,543 @@ def calculate_energy_sums(dfs):
     
     return energy_sums
 
+
+def create_deltaT_over_film_coeff_plots(
+    dfs,
+    water_regex=r"^T_WH\d+$",
+    enamel_regex=r"^T_ENM\d+$",
+    film_regex=r"^Film Tank Heat Transfer Coefficient \(W/m\^2-K\)$",
+    hot_water_col="Hot Water Delivered (L/min)",
+    use_abs_deltaT=True,
+    title_prefix="ΔT / h over time"
+):
+    """
+    Iterate over {file: df}. For each df (skipping ones without water/enamel/film HTC):
+      - Find water & enamel node columns by regex.
+      - Average them to get T_water_avg and T_enamel_avg.
+      - ΔT = |T_water_avg - T_enamel_avg| (or signed if use_abs_deltaT=False).
+      - Compute ratio R = ΔT / h using film coefficient column (W/m^2-K).
+      - Plot R vs Time (left y-axis) and hot water draw (converted to gal/min) on right y-axis.
+    """
+    all_figs = []
+    figure_metadata = []
+
+    water_rx  = re.compile(water_regex)
+    enamel_rx = re.compile(enamel_regex)
+    film_rx   = re.compile(film_regex)
+
+    for file, df in dfs.items():
+        # Ensure Time column present and usable
+        if "Time" not in df.columns:
+            if "time" in df.columns:
+                df = df.rename(columns={"time": "Time"})
+            else:
+                continue  # skip: no time axis
+
+        dfi = df.copy()
+        dfi["Time"] = pd.to_datetime(dfi["Time"], errors="coerce")
+        dfi = dfi.dropna(subset=["Time"])
+
+        # Find columns by regex
+        water_cols  = [c for c in dfi.columns if water_rx.search(c)]
+        enamel_cols = [c for c in dfi.columns if enamel_rx.search(c)]
+        film_cols   = [c for c in dfi.columns if film_rx.search(c)]
+
+        # Skip if missing required sets
+        if not water_cols or not enamel_cols or not film_cols:
+            continue
+        film_col = film_cols[0]
+
+        # Compute averages
+        water_avg  = dfi[water_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1)
+        enamel_avg = dfi[enamel_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1)
+
+        # ΔT
+        deltaT = water_avg - enamel_avg
+        if use_abs_deltaT:
+            deltaT = deltaT.abs()
+
+        # Film coefficient h and ratio ΔT / h
+        h = pd.to_numeric(dfi[film_col], errors="coerce")
+        # avoid division by zero or invalid h
+        h = h.replace(0, pd.NA)
+        ratio = (deltaT / h).dropna()
+
+        if ratio.empty:
+            continue
+
+        # Optional hot water draw (gal/min) on secondary axis
+        hot_gpm = None
+        if hot_water_col in dfi.columns:
+            hot_gpm = pd.to_numeric(dfi[hot_water_col], errors="coerce") * L_TO_GAL_RATIO
+
+        # Build figure with secondary y-axis
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_trace(
+            go.Scatter(
+                x=dfi.loc[ratio.index, "Time"],
+                y=ratio,
+                mode="lines",
+                name="ΔT / h",
+                line=dict(width=2)
+            ),
+            secondary_y=False
+        )
+
+        if hot_gpm is not None:
+            valid_hw = hot_gpm.notna() & dfi["Time"].notna()
+            if valid_hw.any():
+                fig.add_trace(
+                    go.Scatter(
+                        x=dfi.loc[valid_hw, "Time"],
+                        y=hot_gpm.loc[valid_hw],
+                        mode="lines",
+                        name="Hot Water Draw (gpm)",
+                        line=dict(width=1.6, dash="dot")
+                    ),
+                    secondary_y=True
+                )
+
+        # Axes & layout
+        fig.update_yaxes(title_text="ΔT / h  [K²·m²/W]", secondary_y=False)
+        fig.update_yaxes(title_text="Hot Water (gal/min)", secondary_y=True)
+        fig.update_layout(
+            title=f"{title_prefix} – {file}",
+            xaxis_title="Time",
+            height=520,
+            showlegend=True
+        )
+
+        all_figs.append(fig)
+        figure_metadata.append({
+            "file": file,
+            "type": "deltaT_over_h_with_hotwater",
+            "water_regex": water_regex,
+            "enamel_regex": enamel_regex,
+            "film_regex": film_regex,
+            "hot_water_col": hot_water_col
+        })
+
+    return all_figs, figure_metadata
+
+def create_deltaT_vs_film_coeff_scatter(
+    dfs,
+    water_regex=r"^T_WH\d+$",
+    enamel_regex=r"^T_ENM\d+$",
+    # Per-layer film HTC columns like: "Film Tank T_WH1 Heat Transfer Coefficient (W/m^2-K)"
+    film_regex=r"^Film Tank T_WH\d+ Heat Transfer Coefficient \(W/m\^2-K\)$",
+    use_abs_deltaT=True,
+    title_prefix="ΔT vs Film Heat Transfer Coefficient"
+):
+    """
+    Iterate over {file: df}. For each df (skipping ones without water/enamel/film HTC):
+      - Discover *all* per-layer film HTC columns (e.g., 'Film Tank T_WH1 Heat Transfer Coefficient (W/m^2-K)').
+      - For each layer N found in a film-HTC column '... T_WHN ...':
+          * Prefer ΔT_N = T_WHN - T_ENMN if both per-layer nodes exist.
+          * Else fallback to ΔT_avg = (mean water nodes) - (mean enamel nodes).
+        (Apply absolute value if use_abs_deltaT=True.)
+      - Plot one scatter trace per layer (ΔT on x, h on y) in a single figure per file.
+      - Return figures and detailed metadata, including the exact film columns used and the ΔT source (pair vs average).
+    """
+    all_figs = []
+    figure_metadata = []
+
+    water_rx  = re.compile(water_regex)
+    enamel_rx = re.compile(enamel_regex)
+    film_rx   = re.compile(film_regex)
+
+    # Helper to coerce numeric DataFrame columns
+    def _num(df_sub):
+        return df_sub.apply(pd.to_numeric, errors="coerce")
+
+    for file, df in dfs.items():
+        if "Time" not in df.columns:
+            if "time" in df.columns:
+                df = df.rename(columns={"time": "Time"})
+            else:
+                # Time not present; we don't strictly need it for this plot, but keep the original behavior.
+                pass
+
+        dfi = df.copy()
+        if "Time" in dfi.columns:
+            dfi["Time"] = pd.to_datetime(dfi["Time"], errors="coerce")
+            dfi = dfi.dropna(subset=["Time"])
+
+        # Find node columns
+        water_cols_all  = [c for c in dfi.columns if water_rx.search(c)]
+        enamel_cols_all = [c for c in dfi.columns if enamel_rx.search(c)]
+        film_cols_all   = [c for c in dfi.columns if film_rx.search(c)]
+
+        # Must have at least one water, one enamel, and at least one film column
+        if not water_cols_all or not enamel_cols_all or not film_cols_all:
+            continue
+
+        # Pre-compute averages for fallback
+        water_avg  = _num(dfi[water_cols_all]).mean(axis=1)
+        enamel_avg = _num(dfi[enamel_cols_all]).mean(axis=1)
+
+        # Build the figure with a trace per film layer
+        fig = go.Figure()
+        trace_count = 0
+        per_layer_metadata = []
+        used_film_columns = []
+
+        # Regex to pull layer number from a film column: look for 'T_WH(\d+)'
+        layer_rx = re.compile(r"T_WH(\d+)")
+
+        for film_col in film_cols_all:
+            m = layer_rx.search(film_col)
+            if not m:
+                # If no layer number found, skip this column
+                continue
+            layer_id = m.group(1)
+
+            # Try to find matching water/enamel columns for this layer
+            water_col_layer = f"T_WH{layer_id}"
+            enamel_col_layer = f"T_ENM{layer_id}"
+
+            have_layer_pair = (water_col_layer in dfi.columns) and (enamel_col_layer in dfi.columns)
+
+            if have_layer_pair:
+                w = pd.to_numeric(dfi[water_col_layer], errors="coerce")
+                e = pd.to_numeric(dfi[enamel_col_layer], errors="coerce")
+                deltaT = w - e
+                deltaT_source = "layer_pair"
+            else:
+                # Fallback to averages
+                deltaT = water_avg - enamel_avg
+                deltaT_source = "avg_fallback"
+
+            if use_abs_deltaT:
+                deltaT = deltaT.abs()
+
+            h = pd.to_numeric(dfi[film_col], errors="coerce")
+
+            mask = deltaT.notna() & h.notna() & (h > 0)
+            if not mask.any():
+                # Nothing valid to plot for this layer
+                per_layer_metadata.append({
+                    "film_column": film_col,
+                    "layer": layer_id,
+                    "deltaT_source": deltaT_source,
+                    "water_col_used": water_col_layer if have_layer_pair else sorted(water_cols_all),
+                    "enamel_col_used": enamel_col_layer if have_layer_pair else sorted(enamel_cols_all),
+                    "points_plotted": 0
+                })
+                continue
+
+            fig.add_trace(
+                go.Scatter(
+                    x=deltaT[mask],
+                    y=h[mask],
+                    mode="markers",
+                    name=f"Layer {layer_id} (T_WH{layer_id})",
+                    marker=dict(size=5, opacity=0.6)
+                )
+            )
+            trace_count += 1
+            used_film_columns.append(film_col)
+            per_layer_metadata.append({
+                "film_column": film_col,
+                "layer": layer_id,
+                "deltaT_source": deltaT_source,
+                "water_col_used": water_col_layer if have_layer_pair else sorted(water_cols_all),
+                "enamel_col_used": enamel_col_layer if have_layer_pair else sorted(enamel_cols_all),
+                "points_plotted": int(mask.sum())
+            })
+
+        # If no valid traces, skip the figure
+        if trace_count == 0:
+            continue
+
+        # Axes & layout
+        fig.update_xaxes(title_text="ΔT [K]")
+        fig.update_yaxes(title_text="Film Heat Transfer Coefficient h [W/m²·K]")
+        fig.update_layout(
+            title=f"{title_prefix} – {file}",
+            height=560,
+            showlegend=True,
+            legend_title_text="Tank Layer"
+        )
+
+        all_figs.append(fig)
+        figure_metadata.append({
+            "file": file,
+            "type": "deltaT_vs_h_scatter_per_layer",
+            "water_regex": water_regex,
+            "enamel_regex": enamel_regex,
+            "film_regex": film_regex,
+            "used_film_columns": used_film_columns,
+            "layer_details": per_layer_metadata
+        })
+
+    return all_figs, figure_metadata
+
+def create_deltaT_over_time_plots(
+    dfs,
+    water_regex=r"^T_WH\d+$",
+    enamel_regex=r"^T_ENM\d+$",
+    use_abs_deltaT=True,
+    title_prefix="ΔT over time"
+):
+    """
+    For each df:
+      - Find water & enamel node columns by regex.
+      - Average them to get T_water_avg and T_enamel_avg.
+      - ΔT = |T_water_avg - T_enamel_avg| (or signed if use_abs_deltaT=False).
+      - Plot ΔT vs Time (line plot).
+    """
+    all_figs = []
+    figure_metadata = []
+
+    water_rx  = re.compile(water_regex)
+    enamel_rx = re.compile(enamel_regex)
+
+    for file, df in dfs.items():
+        # Normalize time
+        if "Time" not in df.columns:
+            if "time" in df.columns:
+                df = df.rename(columns={"time": "Time"})
+            else:
+                continue
+        dfi = df.copy()
+        dfi["Time"] = pd.to_datetime(dfi["Time"], errors="coerce")
+        dfi = dfi.dropna(subset=["Time"])
+
+        # Find columns
+        water_cols  = [c for c in dfi.columns if water_rx.search(c)]
+        enamel_cols = [c for c in dfi.columns if enamel_rx.search(c)]
+        if not water_cols or not enamel_cols:
+            continue
+
+        # Compute ΔT
+        water_avg  = dfi[water_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1)
+        enamel_avg = dfi[enamel_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1)
+        deltaT = water_avg - enamel_avg
+        if use_abs_deltaT:
+            deltaT = deltaT.abs()
+
+        if deltaT.notna().sum() == 0:
+            continue
+
+        # Plot ΔT over time
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=dfi["Time"],
+                y=deltaT,
+                mode="lines",
+                name="ΔT",
+                line=dict(width=2)
+            )
+        )
+        fig.update_xaxes(title_text="Time")
+        fig.update_yaxes(title_text="ΔT [K]")
+        fig.update_layout(
+            title=f"{title_prefix} – {file}",
+            height=480,
+            showlegend=False
+        )
+
+        all_figs.append(fig)
+        figure_metadata.append({
+            "file": file,
+            "type": "deltaT_over_time",
+            "water_regex": water_regex,
+            "enamel_regex": enamel_regex
+        })
+
+    return all_figs, figure_metadata
+
+
+
+def create_film_htc_plots(
+    dfs,
+    # Per-layer columns like: "Film Tank T_WH1 Heat Transfer Coefficient (W/m^2-K)"
+    film_regex=r"^Film Tank T_WH\d+ Heat Transfer Coefficient \(W/m\^2-K\)$",
+    hot_water_col="Hot Water Delivered (L/min)",
+    title_prefix="Film HTC and Hot Water Delivered"
+):
+    """
+    Iterate over {file: df}. For each df:
+      - Discover *all* per-layer film HTC columns (e.g., 'Film Tank T_WH1 Heat Transfer Coefficient (W/m^2-K)').
+      - Plot one line per layer (Film HTC vs Time) on the left y-axis.
+      - Plot hot water delivered (converted to gal/min) vs Time on the right y-axis.
+      - Overlay semi-transparent regions where 'Water Heating Mode' contains 'Heat Pump On'.
+    Skips files missing either at least one film HTC column or the hot water column.
+    Returns (figs, metadata) where metadata records which film columns/layers were used and any overlay spans.
+    """
+    all_figs = []
+    figure_metadata = []
+
+    film_rx = re.compile(film_regex)
+    layer_rx = re.compile(r"T_WH(\d+)")  # extract layer number
+
+    for file, df in dfs.items():
+        # Ensure Time column present
+        if "Time" not in df.columns:
+            if "time" in df.columns:
+                df = df.rename(columns={"time": "Time"})
+            else:
+                continue
+
+        dfi = df.copy()
+        dfi["Time"] = pd.to_datetime(dfi["Time"], errors="coerce")
+        dfi = dfi.dropna(subset=["Time"])
+
+        # Find per-layer film HTC columns
+        film_cols = [c for c in dfi.columns if film_rx.search(c)]
+        if not film_cols or hot_water_col not in dfi.columns:
+            continue
+
+        # Convert series to numeric
+        hot_lpm = pd.to_numeric(dfi[hot_water_col], errors="coerce")
+        try:
+            hot_gpm = hot_lpm * L_TO_GAL_RATIO  # assume defined upstream
+        except NameError:
+            hot_gpm = hot_lpm * 0.2641720524
+
+        # Build subplot with secondary y-axis
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        per_layer_metadata = []
+        used_film_columns = []
+        trace_count = 0
+
+        # Track left-axis range for overlay band sizing
+        left_vals_min = None
+        left_vals_max = None
+
+        for film_col in film_cols:
+            m = layer_rx.search(film_col)
+            layer_id = m.group(1) if m else "?"
+
+            h = pd.to_numeric(dfi[film_col], errors="coerce")
+            if h.dropna().empty:
+                per_layer_metadata.append({
+                    "film_column": film_col,
+                    "layer": layer_id,
+                    "points_plotted": 0
+                })
+                continue
+
+            # Update left-axis min/max for overlay sizing
+            col_min = h.min(skipna=True)
+            col_max = h.max(skipna=True)
+            if pd.notna(col_min):
+                left_vals_min = col_min if left_vals_min is None else min(left_vals_min, col_min)
+            if pd.notna(col_max):
+                left_vals_max = col_max if left_vals_max is None else max(left_vals_max, col_max)
+
+            fig.add_trace(
+                go.Scatter(
+                    x=dfi["Time"],
+                    y=h,
+                    mode="lines",
+                    name=f"Layer {int(layer_id):02d} (T_WH{int(layer_id):02d})",
+                    line=dict(width=2)
+                ),
+                secondary_y=False
+            )
+            trace_count += 1
+            used_film_columns.append(film_col)
+            per_layer_metadata.append({
+                "film_column": film_col,
+                "layer": layer_id,
+                "points_plotted": int(h.notna().sum())
+            })
+
+        # Add hot water draw on secondary y-axis
+        if not hot_gpm.dropna().empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=dfi["Time"],
+                    y=hot_gpm,
+                    mode="lines",
+                    name="Hot Water Draw (gpm)",
+                    line=dict(width=2, dash="dot")
+                ),
+                secondary_y=True
+            )
+        else:
+            if trace_count == 0:
+                continue
+
+        if trace_count == 0:
+            continue
+
+        # Compute padding for overlay polygons on left y-axis
+        if left_vals_min is None or left_vals_max is None:
+            # Fallback if somehow not set
+            left_vals_min, left_vals_max = 0.0, 1.0
+        y_pad = (left_vals_max - left_vals_min) * 0.1
+        y0_band = left_vals_min - y_pad
+        y1_band = left_vals_max + y_pad
+
+        # Overlay: "Heat Pump On" regions (from Water Heating Mode)
+        overlay_spans = []
+        if "Water Heating Mode" in dfi.columns:
+            mode = dfi["Water Heating Mode"].astype(str)
+            times = dfi["Time"]
+
+            def heat_pump_regions():
+                spans, in_seg = [], False
+                start = None
+                for j, mstr in enumerate(mode):
+                    if ("Heat Pump On" in mstr) and not in_seg:
+                        start, in_seg = j, True
+                    elif ("Heat Pump On" not in mstr) and in_seg:
+                        spans.append((times.iloc[start], times.iloc[j]))
+                        in_seg = False
+                if in_seg:
+                    spans.append((times.iloc[start], times.iloc[len(mode) - 1]))
+                return spans
+
+            hp_regions = heat_pump_regions()
+            overlay_spans = [(str(t0), str(t1)) for (t0, t1) in hp_regions]
+
+            # Add semi-transparent green bands as filled polygons on left axis
+            for k, (t0, t1) in enumerate(hp_regions):
+                fig.add_trace(
+                    go.Scatter(
+                        x=[t0, t1, t1, t0, t0],
+                        y=[y0_band, y0_band, y1_band, y1_band, y0_band],
+                        fill="toself",
+                        fillcolor="rgba(0,255,0,0.15)",
+                        line=dict(width=0),
+                        mode="none",
+                        name="Heat Pump On" if k == 0 else None,
+                        showlegend=(k == 0),
+                        hoverinfo="skip",
+                        legendgroup="heat_pump"
+                    ),
+                    secondary_y=False
+                )
+
+        # Axes & layout
+        fig.update_yaxes(title_text="Film HTC (W/m²·K)", secondary_y=False)
+        fig.update_yaxes(title_text="Hot Water (gal/min)", secondary_y=True)
+        fig.update_layout(
+            title=f"{title_prefix} – {file}",
+            xaxis_title="Time",
+            height=560,
+            showlegend=True,
+            legend_title_text="Series"
+        )
+
+        all_figs.append(fig)
+        figure_metadata.append({
+            "file": file,
+            "type": "film_htc_and_hotwater_per_layer",
+            "film_regex": film_regex,
+            "used_film_columns": used_film_columns,
+            "layer_details": per_layer_metadata,
+            "hot_water_col": hot_water_col,
+            "heat_pump_on_spans": overlay_spans  # stringified time spans for ease of serialization
+        })
+
+    return all_figs, figure_metadata
+
+
 def plot_energy_comparison(dfs, energy_sums):
     """
     Create plots comparing energy values across different files.
@@ -2933,6 +3592,41 @@ if __name__ == "__main__":
     parallel_display_plots(all_plots, stagger_delay=0.1)  # 0.1 second delay between plots
     print(f"Temp chart display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
+    _plot_time = time.perf_counter()
+    film_temp_charts, film_temp_metadata = create_deltaT_over_film_coeff_plots(dfs)
+    print(f"Film coeff plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    
+    _plot_time = time.perf_counter()
+    parallel_display_plots(film_temp_charts, stagger_delay=0.1)  # 0.1 second delay between plots
+    print(f"Film coeff plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    
+    _plot_time = time.perf_counter()
+    film_htc_charts, film_htc_metadata = create_film_htc_plots(dfs)
+    print(f"Film HTC plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    
+    _plot_time = time.perf_counter()
+    parallel_display_plots(film_htc_charts, stagger_delay=0.1)  # 0.1 second delay between plots
+    print(f"Film HTC plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    
+    
+    # _plot_time = time.perf_counter()
+    # film_htc_charts, film_htc_metadata = create_deltaT_vs_film_coeff_scatter(dfs)
+    # print(f"Film HTC plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    
+    # _plot_time = time.perf_counter()
+    # parallel_display_plots(film_htc_charts, stagger_delay=0.1)  # 0.1 second delay between plots
+    # print(f"Film HTC plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    
+    # _plot_time = time.perf_counter()
+    # dt_charts, dt_metadata = create_deltaT_over_time_plots(dfs)
+    # print(f"ΔT over time plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    
+    # _plot_time = time.perf_counter()
+    # parallel_display_plots(dt_charts, stagger_delay=0.1)  # 0.1 second delay between plots
+    # print(f"ΔT over time plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    
+    
+    
     # _plot_time = time.perf_counter()
     # all_plots = parallel_create_energy_output_plots(dfs, uef_values=uef, patterns=['T_WH', 'T_PCM'])
     # print(f"Energy output processing pool time: {time.perf_counter() - _plot_time:.2f} seconds")
@@ -2950,7 +3644,7 @@ if __name__ == "__main__":
 
     # # Draw data summary
     _hot_water_delivered_pool_time = time.perf_counter()
-    output = calculate_hot_water_delivered(dfs, first_hour_test=True)
+    output = calculate_hot_water_delivered(dfs, first_hour_test=False)
     print(f"Hot water delivered pool time: {time.perf_counter() - _hot_water_delivered_pool_time:.2f} seconds")
     
     # _hot_water_plot_time = time.perf_counter()

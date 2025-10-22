@@ -770,7 +770,7 @@ def plot_2d_comparison_generic(dfs, draw_outputs, x_column_pattern, y_column_pat
             return None
 
     title_total = (
-        f"74% Back Filled Resin First-Hour Rating: {y_column_pattern} vs SA/V Ratio<br>"
+        f"MEPCM 66% Loading First-Hour Rating:<br>{y_column_pattern} vs SA/V Ratio "
         f"Cutoff=110°F; Setpoint={setpoint}°F; PCM Melt={pcm_temp}°F<br>Tank Size: {tank_size} gal"
     )
     fig_total_water = _safe_plot(
@@ -781,7 +781,7 @@ def plot_2d_comparison_generic(dfs, draw_outputs, x_column_pattern, y_column_pat
     )
 
     title_first = (
-        f"74% Back Filled Resin Initial Draw Rating: {y_column_pattern} vs SA/V Ratio<br>"
+        f"MEPCM 66% Loading Initial Draw Rating:<br>{y_column_pattern} vs SA/V Ratio "
         f"Cutoff=110°F; Setpoint={setpoint}°F; PCM Melt={pcm_temp}°F<br>Tank Size: {tank_size} gal"
     )
     fig_firstdraw_water = _safe_plot(
@@ -1886,8 +1886,13 @@ def process_single_folder(output_folder, folder):
         print(f"⚠️  Tank size {tank_size} is not 40gal")
         return
     
-    if pcm_temp != 131:
-        print(f"⚠️  PCM temperature {pcm_temp} is not 131F")
+    not_correct_pcm_temp = False
+    correct_pcm_temps = [131, 127]
+    if pcm_temp not in correct_pcm_temps:
+        print(f"⚠️  PCM temperature {pcm_temp} is not 131F or 127F")
+        not_correct_pcm_temp = True
+    
+    if not_correct_pcm_temp:
         return
     
     # 3. Build the full folder path and load data
@@ -1922,7 +1927,7 @@ def get_output_folders(root_dir):
 
     # 1) if root itself has no subdirs, include it
     if root.is_dir() and not any(child.is_dir() for child in root.iterdir()):
-        if "no_shift" not in p.name:
+        if "no_shift" not in root.name:
             leafs.append(str(root))
 
     # 2) now scan descendants

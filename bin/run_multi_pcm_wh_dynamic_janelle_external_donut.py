@@ -74,7 +74,8 @@ h_values = [5000]
 simulation_duration_days = 220
 
 # pcm_file_names = ['cp_h-T_data_shifted_120F.csv']
-pcm_file_names = ['90-cp_h-T_data_shifted_120F.csv']
+pcm_file_names = ['cp_h-T_data_52_6C.csv']
+
 # pcm_file_names = [f'90%_cp_h-T_data_shifted_{i}F.csv' for i in range(110, 142, 1)]
 
 setpoint_temps_f = [140]
@@ -88,9 +89,10 @@ setpoint_temps_c = [
 # films_h = np.logspace(np.log10(50), np.log10(1000), 11)
 # pcms_thickness_in = np.linspace(0.1, 1.25, 11)
 
-films_h = [150, 1000]
-pcms_thickness_in = [1.2]
-pcms_segment_thickness_inches = [1.2]
+films_h = [150]
+pcms_thickness_in = [0.001,0.1,0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+# pcms_thickness_in = [0.2]
+pcms_segment_thickness_inches = [0.1]
 # pcms_segment_thickness_inches = [1.2]
 
 # tank_volume_gal = [40,50, 65]
@@ -119,14 +121,15 @@ for vol_fract in vol_fracs:
 
 
 
-load_profile = "2.00gpm30min_0gpm180min_cycling.csv"
-load_profile = "2.00gpm30min_0gpm600min_cycling.csv"
-load_profile = "2.00gpm120min_0gpm600min_cycling.csv"
-load_profile = "MediumUseL.csv"
-load_profile = "2.00gpm_1200minStartIdle_2cycles_30minDraw_240minOff_0minEndIdle.csv"
-load_profile = "2.00gpm_1200minStartIdle_ 2cycles_30minDraw_240minOff_0minEndIdle_Single_draw.csv"
-load_profiles = ["MediumUseL.csv", "2.00gpm30min_0gpm600min_cycling.csv"]
-load_profile = "net_flow_90023_220day.csv"
+# load_profile = "2.00gpm30min_0gpm180min_cycling.csv"
+# load_profile = "2.00gpm30min_0gpm600min_cycling.csv"
+# load_profile = "2.00gpm120min_0gpm600min_cycling.csv"
+# load_profile = "MediumUseL.csv"
+load_profile = "MediumUseL_single_column.csv"
+# load_profile = "2.00gpm_1200minStartIdle_2cycles_30minDraw_240minOff_0minEndIdle.csv"
+# load_profile = "2.00gpm_1200minStartIdle_ 2cycles_30minDraw_240minOff_0minEndIdle_Single_draw.csv"
+# load_profiles = ["MediumUseL.csv", "2.00gpm30min_0gpm600min_cycling.csv"]
+# load_profile = "net_flow_90023_220day.csv"
 
 def convert_dict_to_name(dict):
     # Check if all values are the same
@@ -167,7 +170,7 @@ default_args = {
     "save_results": None,  # if True, must specify output_path # None Merges the simulator results into 1 file
     "output_path": '../OCHRE_output/OCHRE_results/results/',
     "name": "ZDefault_ElectricResistanceWaterHeater",
-    # "schedule_input_file": load_profile,
+    "schedule_input_file": load_profile,
 }
 
 def import_water_heating_schedule(schedule_file):
@@ -420,7 +423,7 @@ def create_water_schedule(
             water_withdraw.extend([0] * remaining)
             setpoint_temp.extend([setpoint_default] * remaining)
     else:
-        water_withdraw = list(withdraw_rate_lpm)
+        water_withdraw = withdraw_rate_lpm.iloc[:,0].astype(float).tolist()
         setpoint_temp = [setpoint_default] * total_minutes
         # If no_heating_during_draw is True, set the setpoint to draw_setpoint 
         # during periods when water is being withdrawn (non-zero withdrawal rate)
@@ -669,7 +672,8 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
     else:
         hot_water_schedule = import_water_heating_schedule(default_args.get('schedule_input_file'))
         times = pd.date_range(dt.datetime(2018, 1, 1, 0, 0), dt.datetime(2018, 1, 1, 0, 0) + dt.timedelta(minutes=len(hot_water_schedule)), freq=dt.timedelta(minutes=1), inclusive="left")
-        duration = times[-1] - times[0]
+        # duration = times[-1] - times[0]
+        duration = dt.timedelta(days=2)
         schedule = create_water_schedule(withdraw_rate_lpm=hot_water_schedule, setpoint_default=setpoint_temp, no_heating_during_draw=False, times=times)
         
         
@@ -688,8 +692,8 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
         "HPWH COP (-)": 4.5,
         "duration": duration,
         **default_args,
-        # "time_res": dt.timedelta(minutes=1),
-        "time_res": dt.timedelta(seconds=0.5),
+        "time_res": dt.timedelta(minutes=1),
+        # "time_res": dt.timedelta(seconds=0.5),
         "hp_only_mode": True
     }
 
@@ -932,7 +936,8 @@ if __name__ == "__main__":
                                             # Add PCM model with specific volume fraction
                                             model_name = convert_dict_to_name(pcm_vol_fraction)
 
-                                            model_name = f"Heatpump_thickness-{external_pcm_thickness_in:.2f}_segment_thickness-{pcm_segment_thickness_inches:.2f}_water_side_film_h-{film_h:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
+                                            # model_name = f"Heatpump_thickness-{external_pcm_thickness_in:.2f}_segment_thickness-{pcm_segment_thickness_inches:.2f}_water_side_film_h-{film_h:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
+                                            model_name = f"Heatpump_thickness-{external_pcm_thickness_in:.2f}_segment_thickness-{pcm_segment_thickness_inches:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
                                             i += 1
                                             current_default_args = add_pcm_model(
                                                 current_default_args,

@@ -576,16 +576,19 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         pcm_thickness_in: float = 1,
         pcm_split_thickness_in: float = 0.005,     # in PCM thickness
         insulation_thickness_in: float = 2,       # in insulation thickness
-        insulation_k_value: float = 0.05,         # W/m·K
+        insulation_k_value: float = 0.0484,         # W/m·K
         insulation_cp_value: float = 1000.0,      # J/kg·K
+        # insulation_cp_value: float = 1e-2,      # J/kg·K
         insulation_density: float = 40.0,         # kg/m³
         enamel_thickness_in: float = 0.008,       # ≈0.2 mm glass-enamel
         enamel_k_value: float = 1.0,              # W/m·K (vitreous enamel)
         enamel_cp_value: float = 840.0,           # J/kg·K (glass)
+        # enamel_cp_value: float = 1e-2,           # J/kg·K (glass)
         enamel_density: float = 2500.0,           # kg/m³ (glass)
         steel_wall_thickness_in: float = 0.1,      # ≈2.75 mm total wall
         steel_k_value: float = 55.0,              # W/m·K mildsteel
         steel_cp_value: float = 490.0,            # J/kg·K mild steel
+        # steel_cp_value: float = 1e-2,            # J/kg·K mild steel
         steel_density: float = 7850.0,            # kg/m³
         water_side_film_h: float | None = 50,    # W/m²·K
         **kwargs,
@@ -634,8 +637,10 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         # Convert thicknesses to meters
         self.enamel_thickness_m = float(enamel_thickness_in * IN_TO_M)
         self.steel_wall_thickness_m = float(steel_wall_thickness_in * IN_TO_M)
-        self.insulation_thickness_m = float(insulation_thickness_in * IN_TO_M)
         self.pcm_thickness_m = float(self.pcm_thickness_in * IN_TO_M)
+        # self.insulation_thickness_m = float(insulation_thickness_in * IN_TO_M)
+        # max 2 inches of pcm + insulation
+        self.insulation_thickness_m = float(2.0 * IN_TO_M - self.pcm_thickness_m)
 
         # ------------------------------------------------------------------
         # Compute U-values for each layer
@@ -674,10 +679,11 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         self.t_pcm_idx = [i for i, name in enumerate(self.state_names) if "T_PCM" in name]
         self.h_pcm_idx = [i for i, name in enumerate(self.input_names) if "H_PCM" in name]
         self.t_wh_idx = [i for i, name in enumerate(self.state_names) if "T_WH" in name]
+        self.t_en_idx = [i for i, name in enumerate(self.state_names) if "T_ENM" in name]
         # assert [self.state_names.index(f"T_WH{node}") for node in self.pcm_water_nodes] == self.t_pcm_wh_idx
         # self.h_pcm_wh_idx = [self.input_names.index(f"H_WH{node}") for node in self.pcm_water_nodes]
         
-        self.t_pcm_wh_idx = [name for name in self.state_names if name.startswith("T_PCM")] 
+        self.t_pcm_wh_idx = [name for name in self.state_names if name.startswith("T_PCM")]
         
         self.enthalpy_pcm: np.ndarray = np.interp(
             self.states[self.t_pcm_idx], self.key_temp, self.key_enthalpy * self.pcm_mass_kg * 1e3
@@ -725,17 +731,18 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
 
         # PCM layer thickness parameters (adjustable from 0.005" to 20")
         pcm_in_max = 20
-        pcm_in_min = 0.005
-        if self.pcm_thickness_m/0.0254 < pcm_in_min:
-            print(f"Warning: PCM thickness {self.pcm_thickness_m/0.0254} inches is less than {pcm_in_min} inches. Clamping to {pcm_in_min} inches.")
+        pcm_in_min = 1e-12
+        IN_TO_M = 0.0254
+        if self.pcm_thickness_m/IN_TO_M < pcm_in_min:
+            print(f"Warning: PCM thickness {self.pcm_thickness_m/IN_TO_M} inches is less than {pcm_in_min} inches. Clamping to {pcm_in_min} inches.")
             pcm_thickness_inches = pcm_in_min
-        elif self.pcm_thickness_m/0.0254 > pcm_in_max:
-            print(f"Warning: PCM thickness {self.pcm_thickness_m/0.0254} is greater than {pcm_in_max} inches. Clamping to {pcm_in_max} inches.")
-            pcm_thickness_inches = 20
+        elif self.pcm_thickness_m/IN_TO_M > pcm_in_max:
+            print(f"Warning: PCM thickness {self.pcm_thickness_m/IN_TO_M} is greater than {pcm_in_max} inches. Clamping to {pcm_in_max} inches.")
+            pcm_thickness_inches = pcm_in_max
         else:
-            pcm_thickness_inches = kwargs.get("pcm_thickness_inches", self.pcm_thickness_m / 0.0254)
-            pcm_thickness_inches = max(0.005, min(20.0, pcm_thickness_inches))  # Clamp to valid range
-        pcm_thickness_m = pcm_thickness_inches * 0.0254  # Convert to meters
+            pcm_thickness_inches = kwargs.get("pcm_thickness_inches", self.pcm_thickness_m / IN_TO_M)
+            pcm_thickness_inches = max(pcm_in_min, min(pcm_in_max, pcm_thickness_inches))  # Clamp to valid range
+        pcm_thickness_m = pcm_thickness_inches * IN_TO_M  # Convert to meters
         
         # Update radii with adjustable PCM thickness
         r_pcm = r_st + pcm_thickness_m
@@ -749,8 +756,45 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         
         # PCM segmentation parameters
         pcm_segment_thickness_inches = self.pcm_segment_thickness_inches
-        pcm_segment_thickness_m = pcm_segment_thickness_inches * 0.0254  # inches to meters
+        pcm_segment_thickness_m = pcm_segment_thickness_inches * IN_TO_M  # inches to meters
         
+        def compute_ua_bypass_shell(rc: dict) -> dict:
+            """
+            Compute UA contributions using only resistors ending in '_AMB'.
+            - Bypass UA: keys that start with 'R_WH' and end with '_AMB'
+            - Shell UA : all other keys that end with '_AMB'
+            Returns a dict with UA_bypass, UA_shell, UA_total.
+            """
+            ua_bypass = 0.0
+            ua_shell  = 0.0
+
+            for key, value in rc.items():
+                # Must be a resistance key pointing to ambient
+                if not (isinstance(key, str) and key.startswith("R_") and key.endswith("_AMB")):
+                    continue
+
+                try:
+                    R = float(value)
+                except Exception:
+                    continue
+                if R <= 0.0:
+                    continue
+
+                G = 1.0 / R
+
+                # Identify bypass vs shell without regex
+                # R_WH{i}_AMB → bypass
+                middle = key[2:-4]  # strip 'R_' prefix and '_AMB' suffix
+                if middle.startswith("WH") and middle[2:].isdigit():
+                    ua_bypass += G
+                else:
+                    ua_shell += G
+
+            return {
+                "UA_bypass": ua_bypass,
+                "UA_shell": ua_shell,
+                "UA_total": ua_bypass + ua_shell,
+            }
         # Robust segmentation algorithm
         def calculate_segments(total_dimension, target_segment_size, min_segments=1, max_segments=1000):
             """Calculate optimal number of segments with robust bounds checking"""
@@ -835,6 +879,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
     
         # self.water_side_film_h = self.calculate_film_convective_heat_transfer_coefficient()
 
+        self.water_side_film_h = 150
         # build RC network per stratum
         for i in range(1, n_nodes+1):
             # water -> enamel convective
@@ -960,6 +1005,31 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
             rc.pop(f"R_WH{i}_AMB", None)
         self.rc_params = rc
         print(f"Total PCM Mass (kg): {self.pcm_mass_kg:.2f}")
+        
+        # Target: make the WH→AMB bypass account for exactly 1/3 of a 2.17 W/K tank UA.
+        # Do this by distributing a TARGET **conductance** (not resistance) across nodes,
+        # with edge nodes having 2× the conductance of middle nodes (=> edge R = 0.5× middle R).
+
+        target_total_UA = 2.17                       # [W/K] overall tank UA
+        target_bypass_UA = target_total_UA / 3.0     # [W/K] bypass should be one-third of total
+
+        # Conductance weights per node: edges = 2, middles = 1 (you can change edge_weight if desired)
+        edge_weight = 2.0
+        weights = [edge_weight] + [1.0]*(n_nodes-2) + [edge_weight] if n_nodes > 1 else [1.0]
+        w_sum = float(sum(weights))
+
+        # Distribute the target bypass conductance over nodes:
+        #   G_i = (w_i / sum(w)) * target_bypass_UA
+        #   R_i = 1 / G_i
+        # This ensures: sum_i (1/R_i) == target_bypass_UA and R_edge = 0.5 * R_middle.
+        for i in range(1, n_nodes + 1):
+            G_i = (weights[i - 1] / w_sum) * target_bypass_UA
+            R_i = 1.0 / max(G_i, 1e-12)
+            rc[f"R_WH{i}_AMB"] = R_i
+            
+        tank_ua_values = compute_ua_bypass_shell(rc)
+        self.tank_ua_values = tank_ua_values
+        print(tank_ua_values)
         return rc
     
     def update_rc_network(self, t_pcm, states, current_schedule, **kwargs):
@@ -976,7 +1046,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         for i in range(1, self.n_nodes + 1):
             key = f"R_WH{i}_ENM{i}"
             if key in self.rc_params:
-                self.rc_params[key] = float(film_conv_resistance)
+                self.rc_params[key] = float(film_conv_resistance[i-1])
 
 
         for i, node in enumerate(self.pcm_mass_dict.items()):
@@ -1086,128 +1156,108 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
     
     def calculate_film_convective_heat_transfer_coefficient(self, states, current_schedule):
         """
-        Compute & return the water-side film heat transfer coefficient h_conv [W/m^2-K].
-        Uses:
-        - Water temperatures: self.states at indices self.t_wh_idx (°C or K; auto-detected)
-        - Volumetric flow: self.current_schedule['Water Heating (L/min)'] (L/min)
-        - Geometry: self.tank_radius_m, self.tank_height_m
-        Correlations:
-        - Laminar entrance (Graetz): Nu_lam = 1.86*(Re*Pr*D/L)^(1/3)
-        - Turbulent (Dittus–Boelter, heating): Nu_turb = 0.023*Re^0.8*Pr^0.4
-        - Smooth transition 2300→4000
-        Fallback:
-        - If flow ~ 0, returns natural/free convection estimate via Churchill–Chu
-            using ΔT to ambient if available; else falls back to self.water_side_film_h or 10.
+        Water-side film heat transfer coefficient h_conv [W/m^2-K], using the same
+        laminar natural-convection template as the provided MATLAB, but **per node**:
+
+            C_lam = 0.671/(1+(0.492/Pr)^0.5625)^0.444
+            Ra(z) = g * beta(z) * (T_wall(z) - T_fluid(z)) * H^3 / nu^2
+            Nu_lam(z) = 2 / log(1 + (2/(C_lam * Ra(z)^(1/4))))
+            h(z) = Nu_lam(z) * k / H
+
+        Returns:
+            h_z : np.ndarray of shape (n_nodes,) — node-wise film coefficients.
+
+        Notes:
+        - Ignores forced-convection / transition correlations (as requested).
+        - Uses per-node wall & fluid temperatures if available.
+        - Fluid properties (k, ν, Pr) are evaluated at the **mean fluid temperature**.
+        - If `self.water_side_film_h` exists, each node's h(z) is clipped to [0.1, 10]× that reference.
         """
 
-        # ---- helpers: unit-safe temperature & water properties vs temperature ----
-        def _ensure_C(T_arr):
-            T_arr = np.asarray(T_arr, dtype=float)
-            # Heuristic: if temps look like Kelvin (>200), convert to °C
-            if np.nanmedian(T_arr) > 200.0:
-                return T_arr - 273.15
-            return T_arr
+        # ---------------- helpers ----------------
+        def _ensure_C(arr):
+            arr = np.asarray(arr, dtype=float)
+            if np.nanmedian(arr) > 200.0:  # Kelvin → Celsius heuristic
+                return arr - 273.15
+            return arr
 
-        def water_props(Tc):
+        def _to_K(arr_C):
+            return np.asarray(arr_C, dtype=float) + 273.15
+
+        def water_props_C(Tc):
             """
-            Rough but standard single-phase water property fits near room-temp to ~80°C.
-            Returns rho[kg/m3], mu[Pa·s], k[W/m·K], cp[J/kg·K], Pr[-].
+            Returns (rho [kg/m3], mu [Pa·s], k [W/m·K], cp [J/kg·K], Pr [-])
+            Simple fits valid ~20–80°C; good enough to mirror the MATLAB constants.
             """
             Tk = Tc + 273.15
-            # Density (simple linear fit around 20–80°C)
-            rho = 1000.0 - 0.3*(Tc - 20.0)
-            rho = float(max(950.0, min(1000.0, rho)))
-            # Dynamic viscosity (Andrade; Pa·s)
-            mu = 2.414e-5 * 10.0**(247.8/(Tk - 140.0))
-            # Thermal conductivity (mild slope with T)
-            k = 0.561 + 0.0018*(Tc - 20.0)
-            k = float(max(0.55, min(0.68, k)))
-            # Specific heat
-            cp = 4180.0  # J/kg-K
-            # Prandtl
+            rho = float(np.clip(1000.0 - 0.3*(Tc - 20.0), 950.0, 1000.0))
+            mu = 2.414e-5 * 10.0**(247.8/(Tk - 140.0))       # Pa·s (Andrade)
+            k  = float(np.clip(0.561 + 0.0018*(Tc - 20.0), 0.55, 0.68))
+            cp = 4180.0
             Pr = cp * mu / k
             return rho, mu, k, cp, Pr
 
-        def smoothstep(x, x0=2300.0, x1=4000.0):
-            """0→1 smooth transition between x0 and x1."""
-            if x <= x0: return 0.0
-            if x >= x1: return 1.0
-            u = (x - x0)/(x1 - x0)
-            return u*u*(3 - 2*u)
-
-        # ---- input temperatures (water nodes) ----
-        T_nodes = _ensure_C(self.states[self.t_wh_idx])
-        T_meanC = float(np.nanmean(T_nodes))
-
-        # ---- flow from schedule: L/min → m^3/s ----
-        Q_lpm = 0.0
-        try:
-            if self.current_schedule is not None:
-                # Accept dict-like or pandas.Series-like
-                Q_lpm = current_schedule.get('Water Heating (L/min)', 0.0)
-        except Exception:
-            Q_lpm = 0.0
-        Q_m3s = max(0.0, Q_lpm / 1000.0 / 60.0)
-
-        # ---- geometry & area ----
+        # ---------------- geometry ----------------
         r = float(self.tank_radius_m)
-        D = 2.0 * r
-        A = math.pi * r * r
-        L = float(getattr(self, "tank_height_m", D))  # characteristic length for entrance effects
+        H = float(getattr(self, "tank_height_m", 2.0*r))
+        if H <= 0.0:
+            raise ValueError("tank_height_m must be > 0")
+        D = 2.0 * r  # kept for completeness; not directly used
 
-        # ---- properties at film temp ----
-        rho, mu, k, cp, Pr = water_props(T_meanC)
+        # ---------------- temperatures (per node) ----------------
+        # Fluid temperatures at water nodes
+        T_fluid_C = _ensure_C(self.states[self.t_wh_idx])
+        # Wall/enamel temperatures aligned with nodes (fallback to fluid mean if absent)
+        T_wall_C  = _ensure_C(self.states[self.t_en_idx]) if getattr(self, "t_en_idx", None) is not None \
+                    else np.full_like(T_fluid_C, float(np.nanmean(T_fluid_C)))
 
-        # ---- compute velocity, Reynolds, Graetz ----
-        # If flow is ~0, handle as natural convection (below)
-        if Q_m3s <= 1e-8 or A <= 0.0 or D <= 0.0:
-            # Try natural/free convection on internal surface as a fallback.
-            # Use ambient if present, else a small ΔT to avoid zero.
-            # Attempt to read ambient input (named 'T_AMB' typically).
-            T_ambC = None
-            try:
-                if hasattr(self, "input_names") and hasattr(self, "inputs"):
-                    if "T_AMB" in self.input_names:
-                        T_ambC = _ensure_C([self.inputs[self.input_names.index("T_AMB")]])[0]
-            except Exception:
-                T_ambC = None
-            if T_ambC is None:
-                # Fall back to a small driving ΔT to avoid zero Ra
-                T_ambC = T_meanC - 5.0
+        # Ensure same length
+        n_nodes = min(T_fluid_C.size, T_wall_C.size)
+        if n_nodes == 0:
+            # Fallback: return a conservative default if we lack states
+            h_default = float(getattr(self, "water_side_film_h", 10.0))
+            return np.array([h_default], dtype=float)
 
-            beta = 1.0 / (T_meanC + 273.15)  # ~1/T, 1/K
-            nu = mu / rho
-            g = 9.81
-            Ra = g * beta * abs(T_meanC - T_ambC) * (L**3) * Pr / (nu**2)
-            # Churchill–Chu for vertical surfaces (robust across Ra,Pr)
-            Cfac = (1.0 + (0.492 / max(Pr, 1e-12))**(9.0/16.0))**(8.0/27.0)
-            Nu_nat = (0.825 + (0.387 * (max(Ra, 1e-16))**(1.0/6.0)) / Cfac)**2
-            h_nat = Nu_nat * k / max(D, 1e-9)  # use D as characteristic
-            # Respect your provided fallback if present
-            if getattr(self, "water_side_film_h", None) is not None:
-                return float(max(0.0, min(5.0*self.water_side_film_h, h_nat)))  # be conservative
-            return float(h_nat)
+        T_fluid_C = T_fluid_C[:n_nodes]
+        T_wall_C  = T_wall_C[:n_nodes]
 
-        u = Q_m3s / A
-        Re = rho * u * D / mu
-        Gz = Re * Pr * D / max(L, 1e-9)
+        T_fluid_K = _to_K(T_fluid_C)
+        T_wall_K  = _to_K(T_wall_C)
 
-        # ---- Nusselt numbers (forced convection) ----
-        # Laminar entrance (Graetz)
-        Nu_lam = 1.86 * (max(Gz, 1e-16))**(1.0/3.0)
-        # Turbulent (Dittus–Boelter, heating)
-        Nu_turb = 0.023 * (max(Re, 1.0)**0.8) * (Pr**0.4)
-        # Smooth transition
-        S = smoothstep(Re, 2300.0, 4000.0)
-        Nu = (1.0 - S) * Nu_lam + S * Nu_turb
+        # ---------------- fluid properties at mean fluid temperature ----------------
+        T_mean_C = float(np.nanmean(T_fluid_C))
+        rho, mu, k_f, cp, Pr_f = water_props_C(T_mean_C)
+        nu_f    = mu / max(rho, 1e-12)                # kinematic viscosity [m^2/s]
+        # alpha_f = k_f / (rho * cp + 1e-12)          # thermal diffusivity [m^2/s] (not used directly here)
+        g       = 9.81
 
-        # ---- convective coefficient ----
-        h_conv = Nu * k / D
+        # MATLAB's C_lam function of Pr:
+        # C_lam = 0.671/(1+(0.492/Pr)^0.5625)^0.444
+        C_lam = 0.671 / (1.0 + (0.492/max(Pr_f, 1e-12))**0.5625)**0.444
 
-        # If you have multiple nodes with varying local conditions, you could
-        # average per-node h here; for now, we return the scalar based on mean T & bulk flow.
-        return float(h_conv)
-        
+        # ---------------- per-node Gr, Ra, Nu, h ----------------
+        # beta(z) = 1/T_fluid_K(z)
+        beta_z = 1.0 / np.maximum(T_fluid_K, 1e-9)
+
+        # Ra(z) = g * beta(z) * (T_wall - T_fluid) * H^3 / nu^2 (then * Pr)
+        dT = (T_wall_K - T_fluid_K)  # use Kelvin difference
+        Gr_z = g * beta_z * dT * (H**3) / (max(nu_f, 1e-12)**2)
+        Ra_z = Gr_z * Pr_f
+
+        # Nu_lam(z) = 2 / log(1 + (2 / (C_lam * Ra(z)^(1/4))))
+        Ra_quarter = np.maximum(Ra_z, 1e-30)**0.25
+        denom = np.maximum(C_lam * Ra_quarter, 1e-30)
+        inside = 1.0 + (2.0 / denom)
+        # guard log domain
+        inside = np.maximum(inside, 1.0 + 1e-12)
+        Nu_lam_z = 2.0 / np.log(inside)
+
+        # h(z) = Nu(z) * k / H
+        h_z = Nu_lam_z * k_f / H
+
+
+        # Return node-wise coefficients (no averaging)
+        return h_z
 
     def update_inputs(self, schedule_inputs=None):
         # Note: self.inputs_init are not updated here, only self.current_schedule
@@ -1301,7 +1351,10 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         results = super().generate_results()
 
         if self.verbosity >= 6:
-            
+            # water nodes
+            for i, idx in enumerate(self.t_wh_idx):
+                results[f'Film Tank {self.state_names[idx]} Heat Transfer Coefficient (W/m^2-K)'] = self.water_side_film_h[i]            
+            # pcm nodes
             for i, idx in enumerate(self.t_pcm_idx):
                 results[f"Water Tank {self.state_names[idx]} Temperature (C)"] = self.states[idx]
                 results[f"Water Tank {self.state_names[idx]} Water Temperature (C)"] = self.states[idx]
@@ -1313,7 +1366,8 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
             results['Delta Total PCM Enthalpy (J)'] = self.delta_enthalpy_pcm.sum()
             results['Total PCM Heat Injected (W)'] = self.pcm_heat_to_water_rc_network.sum()
             results['PCM Mass (kg)'] = self.pcm_mass_kg
-            results['Film Tank Heat Transfer Coefficient (W/m^2-K)'] = self.water_side_film_h
+            for key,value in self.tank_ua_values.items():
+                results[key] = value
             results['Water Volume (L)'] = self.volume
 
             
