@@ -78,8 +78,8 @@ pcm_file_names = ['cp_h-T_data_52_6C.csv']
 
 # pcm_file_names = [f'90%_cp_h-T_data_shifted_{i}F.csv' for i in range(110, 142, 1)]
 
-setpoint_temps_f = [140]
-# setpoint_temps_f = [125, 140]
+# setpoint_temps_f = [140]
+setpoint_temps_f = [125, 140]
 setpoint_temps_c = [
     (setpoint_temp - 32) * (5 / 9) for setpoint_temp in setpoint_temps_f
 ]
@@ -90,8 +90,8 @@ setpoint_temps_c = [
 # pcms_thickness_in = np.linspace(0.1, 1.25, 11)
 
 films_h = [150]
-pcms_thickness_in = [0.001,0.1,0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
-# pcms_thickness_in = [0.2]
+# pcms_thickness_in = [0.001,0.1,0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+pcms_thickness_in = [0.001]
 pcms_segment_thickness_inches = [0.1]
 # pcms_segment_thickness_inches = [1.2]
 
@@ -679,6 +679,7 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
         
     if not duration:
         duration = dt.timedelta(days=2)
+        # Taken from https://github.com/bigladder/HPWHsim/blob/13f995dbf7e63cc6fb8132bf10622bcbe5a57eb2/test/models_json/AOSmithHPTS40.json
     equipment_args = {
         "verbosity": 9,  # required to get setpoint and deadband in results
         "save_results": None,  # if True, must specify output_path None Merges the simulator results into 1 file
@@ -687,9 +688,9 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
         "Setpoint Temperature (C)": setpoint_temp,
         "Tank Volume (L)": tank_volume * GAL_TO_L * 0.9,
         "Tank Height (m)": 1.22,
-        "UA (W/K)": 2.17,
+        "UA (W/K)": 2.6389, #adjusted from bigladder
         # "UA (W/K)": 1e-9,
-        "HPWH COP (-)": 4.5,
+        "HPWH COP (-)": 4.2, #adjusted from bigladder
         "duration": duration,
         **default_args,
         "time_res": dt.timedelta(minutes=1),

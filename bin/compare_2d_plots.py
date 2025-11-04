@@ -169,13 +169,17 @@ def plot_draw_events(draw_outputs):
 
 
 def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title, z_label, baseline_value=None):
+    import numpy as np
+    import plotly.graph_objects as go
+    from scipy.interpolate import griddata
+
     if df.empty or df[z_column].isna().all():
         print(f"No valid data for {z_column}")
         return None
 
     little_font_size = 16
     medium_font_size = 18
-    
+
     # Points for interpolation
     points = df[['avg_x_value', 'avg_y_value']].values
     values = df[z_column].values
@@ -184,24 +188,12 @@ def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title
     grid_z = griddata(points, values, (x_mesh, y_mesh), method='linear')
 
     # Get min and max values for color scale normalization
-    z_min = np.nanmin(values)
-    z_max = np.nanmax(values)
+    z_min = float(np.nanmin(values))
+    z_max = float(np.nanmax(values))
 
-    # For tick values, clamp min to baseline value and max to data max
-    tick_min = baseline_value if baseline_value is not None else z_min
-    tick_max = z_max
-
-    # Round min/max for tick calculation
-    z_min_rounded = np.floor(z_min)
-    z_max_rounded = np.ceil(z_max)
-    tick_min_rounded = np.floor(tick_min)
-    tick_max_rounded = np.ceil(tick_max)
-    tick_min_rounded = tick_min
-    tick_max_rounded = tick_max
-
-    # Create 10 evenly spaced tick values clamped between baseline and max
-    tick_values = np.linspace(tick_min_rounded, tick_max_rounded, 10)
-    tick_values = np.round(tick_values, 1)  # Round to 1 decimal place
+    # Always use the full data range for global rounding
+    z_min_rounded = float(np.floor(z_min))
+    z_max_rounded = float(np.ceil(z_max))
 
     # Create figure
     fig = go.Figure()
@@ -209,51 +201,84 @@ def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title
     # Define whether higher values are better or worse based on metric
     higher_is_better = z_column in ['total_heat_delivered_kWh', 'total_gal_hot_water_delivered', 'total_energy_used', 'first_draw_hot_water_delivered']
 
-    # Create two color scales - one vibrant, one desaturated
+    # Color scales
     vibrant_colorscale = [
-        [0.0, 'rgb(68, 1, 84)'],       # Dark purple
-        [0.1, 'rgb(72, 40, 120)'],     # Purple
-        [0.2, 'rgb(62, 74, 137)'],     # Blue-purple
-        [0.3, 'rgb(49, 104, 142)'],    # Dark blue
-        [0.4, 'rgb(38, 130, 142)'],    # Teal
-        [0.5, 'rgb(31, 158, 137)'],    # Turquoise
-        [0.6, 'rgb(53, 183, 121)'],    # Green
-        [0.7, 'rgb(109, 205, 89)'],    # Light green
-        [0.8, 'rgb(180, 222, 44)'],    # Yellow-green
-        [0.9, 'rgb(223, 205, 35)'],    # Yellow
-        [1.0, 'rgb(253, 231, 37)']     # Bright yellow
+        [0.0, 'rgb(68, 1, 84)'],
+        [0.1, 'rgb(72, 40, 120)'],
+        [0.2, 'rgb(62, 74, 137)'],
+        [0.3, 'rgb(49, 104, 142)'],
+        [0.4, 'rgb(38, 130, 142)'],
+        [0.5, 'rgb(31, 158, 137)'],
+        [0.6, 'rgb(53, 183, 121)'],
+        [0.7, 'rgb(109, 205, 89)'],
+        [0.8, 'rgb(180, 222, 44)'],
+        [0.9, 'rgb(223, 205, 35)'],
+        [1.0, 'rgb(253, 231, 37)']
     ]
-
     desaturated_colorscale = [
-        [0.0, 'rgb(220, 220, 220)'],  # Light gray
-        [0.2, 'rgb(200, 200, 200)'],  # Gray
-        [0.4, 'rgb(180, 180, 180)'],  # Gray
-        [0.6, 'rgb(160, 160, 160)'],  # Gray
-        [0.8, 'rgb(140, 140, 140)'],  # Gray
-        [1.0, 'rgb(120, 120, 120)']   # Dark gray
+        [0.0, 'rgb(120, 120, 120)'],
+        [0.2, 'rgb(140, 140, 140)'],
+        [0.4, 'rgb(160, 160, 160)'],
+        [0.6, 'rgb(180, 180, 180)'],
+        [0.8, 'rgb(200, 200, 200)'],
+        [1.0, 'rgb(220, 220, 220)']
     ]
-    
 
+    # Helper to build ticks
+    def make_ticks(vmin, vmax, n=10):
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+            return [vmin]
+        ticks = np.linspace(vmin, vmax, n)
+        return np.round(ticks, 1).tolist()
 
-    # If we have a baseline value, create a mask for the contour plot
     if baseline_value is not None:
-        # Create mask for values that are better than baseline
-        mask_better = np.zeros_like(grid_z, dtype=bool)
-        
+        # Determine where grid has better-than-baseline values
         if higher_is_better:
             mask_better = grid_z > baseline_value
+            mask_worse = grid_z <= baseline_value
         else:
             mask_better = grid_z < baseline_value
+            mask_worse = grid_z >= baseline_value
 
-        # Create two separate z arrays for better and worse than baseline
-        grid_z_better = np.copy(grid_z)
-        grid_z_worse = np.copy(grid_z)
-        
-        # Set values outside the mask to NaN
-        grid_z_better[~mask_better] = np.nan
-        grid_z_worse[mask_better] = np.nan
-        
-        # Add contour plot for values worse than baseline (desaturated)
+        # Split grids
+        grid_z_better = np.where(mask_better, grid_z, np.nan)
+        grid_z_worse  = np.where(mask_worse,  grid_z, np.nan)
+
+        has_better_values = np.any(~np.isnan(grid_z_better))
+        has_worse_values  = np.any(~np.isnan(grid_z_worse))
+
+        # CLAMP RULE:
+        # If there are values above/better than the baseline, clamp the minimum colored value to the baseline.
+        # That means the vibrant (better) trace color range starts at the baseline (or ends at baseline for lower-is-better).
+        if has_better_values:
+            if higher_is_better:
+                vibrant_zmin = float(baseline_value)
+                vibrant_zmax = z_max_rounded
+                desat_zmin   = z_min_rounded
+                desat_zmax   = float(baseline_value)  # cap desaturated at baseline
+            else:
+                vibrant_zmin = z_min_rounded
+                vibrant_zmax = float(baseline_value)
+                desat_zmin   = float(baseline_value)  # cap desaturated at baseline
+                desat_zmax   = z_max_rounded
+        else:
+            # No better values; fall back to full range for desaturated-only view
+            vibrant_zmin = z_min_rounded
+            vibrant_zmax = z_max_rounded
+            desat_zmin   = z_min_rounded
+            desat_zmax   = z_max_rounded
+
+        # Colorbar ticks:
+        if has_better_values:
+            # Show only vibrant colorbar; ticks anchored to the clamped vibrant range
+            tick_values_vibrant = make_ticks(vibrant_zmin, vibrant_zmax, 10)
+            tick_values_worse   = make_ticks(desat_zmin, desat_zmax, 10)
+        else:
+            # No better region; use full range (desaturated only)
+            tick_values_vibrant = make_ticks(z_min_rounded, z_max_rounded, 10)
+            tick_values_worse   = make_ticks(z_min_rounded, z_max_rounded, 10)
+
+        # Worse-than-baseline (desaturated)
         contour_worse = go.Contour(
             z=grid_z_worse,
             x=x_grid,
@@ -264,19 +289,20 @@ def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title
                 ticks="outside",
                 tickfont=dict(size=little_font_size),
                 len=0.75,
-                tickvals=tick_values,
-                ticktext=[f"{val:.1f}" for val in tick_values]
+                tickvals=tick_values_worse,
+                ticktext=[f"{val:.1f}" for val in tick_values_worse]
             ),
             ncontours=20,
             contours=dict(showlabels=True, labelfont=dict(size=little_font_size, color='white')),
             line=dict(width=0.5, smoothing=0.85),
-            zmin=z_min_rounded,
-            zmax=z_max_rounded,
-            showscale=False  # Hide colorbar for this trace
+            zmin=desat_zmin,
+            zmax=desat_zmax,
+            zauto=False,
+            showscale=(not has_better_values)  # only show this colorbar if no better region exists
         )
         fig.add_trace(contour_worse)
-        
-        # Add contour plot for values better than baseline (vibrant)
+
+        # Better-than-baseline (vibrant)
         contour_better = go.Contour(
             z=grid_z_better,
             x=x_grid,
@@ -287,20 +313,22 @@ def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title
                 ticks="outside",
                 tickfont=dict(size=little_font_size),
                 len=0.75,
-                tickvals=tick_values,
-                ticktext=[f"{val:.1f}" for val in tick_values],
-                tickmode='array'  # Force specific tick positions
+                tickvals=tick_values_vibrant,
+                ticktext=[f"{val:.1f}" for val in tick_values_vibrant],
+                tickmode='array'
             ),
             ncontours=20,
             contours=dict(showlabels=True, labelfont=dict(size=little_font_size, color='white')),
             line=dict(width=0.5, smoothing=0.85),
-            zmin=tick_min_rounded,
-            zmax=tick_max_rounded,
-            zauto=False  # Disable automatic z-range calculation
+            zmin=vibrant_zmin,
+            zmax=vibrant_zmax,
+            zauto=False
         )
         fig.add_trace(contour_better)
+
     else:
-        # Add regular contour plot if no baseline
+        # No baseline: single vibrant contour over full range
+        tick_values = make_ticks(z_min_rounded, z_max_rounded, 10)
         contour = go.Contour(
             z=grid_z,
             x=x_grid,
@@ -318,112 +346,96 @@ def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title
             contours=dict(showlabels=True, labelfont=dict(size=little_font_size, color='white')),
             line=dict(width=0.5, smoothing=0.85),
             zmin=z_min_rounded,
-            zmax=z_max_rounded
+            zmax=z_max_rounded,
+            zauto=False
         )
         fig.add_trace(contour)
-    
-    # Add scatter points for the data (excluding baseline)
-    for i, row in df.iterrows():
-        marker_props = {}
-        
-        # Color by whether it's better or worse than baseline
+
+    # Scatter points
+    def clamp01(v):
+        return max(0.0, min(1.0, float(v)))
+
+    for _, row in df.iterrows():
         if baseline_value is not None:
-            is_better = (higher_is_better and row[z_column] > baseline_value) or \
-                        (not higher_is_better and row[z_column] < baseline_value)
-            
+            is_better = (higher_is_better and row[z_column] > baseline_value) or (not higher_is_better and row[z_column] < baseline_value)
             if is_better:
-                # Use color from vibrant scale for points better than baseline
-                # Use the same range as the colorbar (tick_min to tick_max)
-                norm_val = (row[z_column] - tick_min_rounded) / (tick_max_rounded - tick_min_rounded)
-                norm_val = max(0, min(1, norm_val))  # Clamp to [0, 1]
-                
-                # Find appropriate color from vibrant colorscale
-                color_idx = int(norm_val * (len(vibrant_colorscale) - 1))
-                color_idx = min(color_idx, len(vibrant_colorscale) - 1)
-                color = vibrant_colorscale[color_idx][1]
+                # Normalize within vibrant (clamped) range
+                denom = (vibrant_zmax - vibrant_zmin) if (vibrant_zmax - vibrant_zmin) != 0 else 1.0
+                norm_val = clamp01((row[z_column] - vibrant_zmin) / denom)
+                palette = vibrant_colorscale
             else:
-                # Use color from desaturated scale for points worse than baseline
-                norm_val = (row[z_column] - z_min_rounded) / (z_max_rounded - z_min_rounded)
-                norm_val = max(0, min(1, norm_val))  # Clamp to [0, 1]
-                
-                # Find appropriate color from desaturated colorscale
-                color_idx = int(norm_val * (len(desaturated_colorscale) - 1))
-                color_idx = min(color_idx, len(desaturated_colorscale) - 1)
-                color = desaturated_colorscale[color_idx][1]
+                # Normalize within desaturated (capped) range
+                denom = (desat_zmax - desat_zmin) if (desat_zmax - desat_zmin) != 0 else 1.0
+                norm_val = clamp01((row[z_column] - desat_zmin) / denom)
+                palette = desaturated_colorscale
         else:
-            # Normal coloring if no baseline - use full data range
-            norm_val = (row[z_column] - z_min_rounded) / (z_max_rounded - z_min_rounded)
-            norm_val = max(0, min(1, norm_val))  # Clamp to [0, 1]
-            
-            # Find appropriate color from vibrant colorscale
-            color_idx = int(norm_val * (len(vibrant_colorscale) - 1))
-            color_idx = min(color_idx, len(vibrant_colorscale) - 1)
-            color = vibrant_colorscale[color_idx][1]
-        
-        marker_props = dict(
-            size=10,
-            color=color,
-            line=dict(width=1, color='black')
-        )
+            # No baseline: normalize across full range
+            denom = (z_max_rounded - z_min_rounded) if (z_max_rounded - z_min_rounded) != 0 else 1.0
+            norm_val = clamp01((row[z_column] - z_min_rounded) / denom)
+            palette = vibrant_colorscale
+
+        color_idx = int(round(norm_val * (len(palette) - 1)))
+        color_idx = max(0, min(len(palette) - 1, color_idx))
+        color = palette[color_idx][1]
+
         hover_text = f"File: {row['file']}<br>{z_label}: {row[z_column]:.2f}"
-        
-        # Add comparison to baseline if available
         if baseline_value is not None:
             diff = row[z_column] - baseline_value
-            diff_pct = (row[z_column] / baseline_value - 1) * 100
-            
-            if higher_is_better:
-                comparison = "better" if diff > 0 else "worse"
-            else:
-                comparison = "better" if diff < 0 else "worse"
-            
+            diff_pct = (row[z_column] / baseline_value - 1) * 100 if baseline_value != 0 else np.nan
+            comparison = "better" if ((higher_is_better and diff > 0) or ((not higher_is_better) and diff < 0)) else "worse"
             hover_text += f"<br>Compared to baseline: {diff:.2f} ({diff_pct:.1f}%), {comparison}"
-        
-        # Add the point
+
         fig.add_trace(go.Scatter(
             x=[row['avg_x_value']],
             y=[row['avg_y_value']],
             mode='markers',
-            marker=marker_props,
+            marker=dict(size=10, color=color, line=dict(width=1, color='black')),
             text=[hover_text],
             hoverinfo='text',
             showlegend=False
         ))
-    
-    # Update layout
-    title_with_baseline = f"{title} (Baseline Hot Water Delivered: {baseline_value:.2f} gal)" if baseline_value is not None else title
+
+    # Title / axes
+    title_with_baseline = f"{title} (Baseline: {baseline_value:.2f} Gal {z_label.split('(')[0].strip()})" if baseline_value is not None else title
     fig.update_layout(
         title=title_with_baseline,
-        title_font=dict(size=18),  # Larger main title
+        title_font=dict(size=18),
         xaxis_title="SA/V Ratio",
         yaxis_title="h_value (W/m²K)",
-        xaxis=dict(
-            tickfont=dict(size=20),   # Bigger tick labels
-            title_font=dict(size=22)  # Bigger axis title
-        ),
-        yaxis=dict(
-            tickfont=dict(size=20),   # Bigger tick labels
-            title_font=dict(size=22)  # Bigger axis title
-        ),
+        xaxis=dict(tickfont=dict(size=20), title_font=dict(size=22)),
+        yaxis=dict(tickfont=dict(size=20), title_font=dict(size=22)),
         height=600,
         width=800
     )
-    
-    fig.add_annotation(
-                        text="Grey = worse than baseline",
-                        xref="paper", yref="paper",
-                        x=0.01, y=0.99,  # adjust position (0=left/bottom,1=right/top)
-                        showarrow=False,
-                        align="left",
-                        font=dict(size=10, color="gray"),
-                        bordercolor="lightgray",
-                        borderwidth=1,
-                        bgcolor="white",
-                        opacity=0.8
-                        )
-    
+
+    # Baseline status banner
+    if baseline_value is not None:
+        all_worse = all(((not higher_is_better) and val > baseline_value) or (higher_is_better and val < baseline_value) for val in values)
+        all_better = all((higher_is_better and val > baseline_value) or ((not higher_is_better) and val < baseline_value) for val in values)
+
+        if all_worse:
+            status_msg, status_color = "⚠️ All values WORSE than baseline", "red"
+        elif all_better:
+            status_msg, status_color = "✓ All values BETTER than baseline", "green"
+        else:
+            status_msg, status_color = "Grey = worse than baseline; Color = ≥ baseline", "gray"
+
+        fig.add_annotation(
+            text=status_msg,
+            xref="paper", yref="paper",
+            x=0.01, y=0.99,
+            showarrow=False,
+            align="left",
+            font=dict(size=8, color=status_color, family="Arial Black"),
+            bordercolor=status_color,
+            borderwidth=2,
+            bgcolor="white",
+            opacity=0.9
+        )
+
     return fig
-    
+
+
 
 
 def plot_2d_comparison(dfs, draw_outputs, setpoint, pcm_temp, tank_type, tank_size):
@@ -596,7 +608,7 @@ def plot_2d_comparison_generic(dfs, draw_outputs, x_column_pattern, y_column_pat
         _h = logging.StreamHandler()
         _h.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
         logger.addHandler(_h)
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel(logging.INFO)
 
     logger.debug(f"Start plot_2d_comparison_generic with {len(dfs)} dfs; "
                  f"x_pattern='{x_column_pattern}', y_pattern='{y_column_pattern}', "
@@ -1899,7 +1911,7 @@ def process_single_folder(output_folder, folder):
     dfs = load_data(results_folder=output_folder)
     
     # 4. Your existing analysis & plotting calls
-    outputs = calculate_hot_water_delivered(dfs, first_hour_test=False)
+    outputs = calculate_hot_water_delivered(dfs, first_hour_test=True)
     # plot_draw_event_summary(output)
     # plot_draw_events(output)
     plot_2d_comparison_generic(dfs, outputs, "sa_ratio", "h (W/m^2K)", setpoint, pcm_temp, tank_type, tank_size)

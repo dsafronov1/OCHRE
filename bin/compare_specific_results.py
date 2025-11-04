@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 from calculate_hot_water_delivered import calculate_hot_water_delivered
+from create_output_csv import export_draw_outputs_csv
 
 
 L_TO_GAL_RATIO = 0.264172
@@ -332,10 +333,25 @@ def _extract_gallons(fname: str):
     Extract the last 'NNgal' token near the end of the filename.
     Supports endings like: ..._40gal.csv, ..._40gal_1, ...-40gal
     """
-    m = None
-    for match in re.finditer(r'(\d+)\s*gal(?=[\._\-]|$)', fname, flags=re.IGNORECASE):
-        m = match
-    return int(m.group(1)) if m else None
+    # Match 'Default' (case-insensitive)
+    default_match = re.search(r'(default)', fname, re.IGNORECASE)
+    default_str = "Default" if default_match else ""
+
+    # Match 'HeatPump', 'Gas', etc. after the PCM or No_PCM tokens
+    system_match = re.search(r'(HeatPump|Gas|Electric|Hybrid|Resistance)', fname, re.IGNORECASE)
+    system_str = system_match.group(1) if system_match else ""
+
+    # Match setpoint (e.g., setpoint-125F)
+    setpoint_match = re.search(r'setpoint[-_]?(\d+)F', fname, re.IGNORECASE)
+    setpoint_str = f"{setpoint_match.group(1)}F" if setpoint_match else ""
+
+    # Match gallons (e.g., 50gal)
+    gal_match = re.search(r'(\d+)\s*gal', fname, re.IGNORECASE)
+    gal_str = f"{gal_match.group(1)}gal" if gal_match else ""
+
+    # Combine with spacing and remove any extra whitespace
+    parts = [default_str, system_str, setpoint_str, gal_str]
+    return " ".join(p for p in parts if p)
 
 def _extract_heatpump_thickness(fname: str):
     """
@@ -412,7 +428,7 @@ def plot_draw_events(draw_outputs):
         vals = water_data[fname]
         is_default = "zDefault" in fname
         gal = _extract_gallons(fname)
-        label = f"{gal}gal" if is_default and gal is not None else fname
+        label = f"{gal}" if is_default and gal is not None else fname
         params = dict(
             name=label,
             legendrank=TOP_LEGEND_BASE + rank,
@@ -447,7 +463,7 @@ def plot_draw_events(draw_outputs):
         val_list = heat_data[fname]
         is_default = "zDefault" in fname
         gal = _extract_gallons(fname)
-        label = f"{gal}gal" if is_default and gal is not None else fname
+        label = f"{gal}" if is_default and gal is not None else fname
         params = dict(
             name=label,
             legendrank=BOTTOM_LEGEND_BASE + rank,  # ensure all heat legends come after water legends
@@ -502,7 +518,7 @@ def plot_totals(draw_outputs):
     for rank, (fname, val) in enumerate(zip(files_sorted, water_totals)):
         is_default = "zDefault" in fname
         gal = _extract_gallons(fname)
-        label = f"{gal}gal" if is_default and gal is not None else fname
+        label = f"{gal}" if is_default and gal is not None else fname
         params = dict(
             name=label,
             legendrank=TOP_LEGEND_BASE + rank,
@@ -523,7 +539,7 @@ def plot_totals(draw_outputs):
     for rank, (fname, val) in enumerate(zip(files_sorted, heat_totals)):
         is_default = "zDefault" in fname
         gal = _extract_gallons(fname)
-        label = f"{gal}gal" if is_default and gal is not None else fname
+        label = f"{gal}" if is_default and gal is not None else fname
         params = dict(
             name=label,
             legendrank=BOTTOM_LEGEND_BASE + rank,
@@ -3580,33 +3596,35 @@ if __name__ == "__main__":
     print(f"Data loading time: {time.perf_counter() - _start_time:.2f} seconds")
     
     _uef_time = time.perf_counter()
-    uef = calculate_uef(dfs)
+    uef_totals = calculate_uef(dfs)
+    uef_global = [x['uef_all'] for x in uef_totals]
+    uef_last_day = [x['uef_last_day'] for x in uef_totals]
     print(f"UEF calculation time: {time.perf_counter() - _uef_time:.2f} seconds")
 
-    _pool_time = time.perf_counter()
-    all_plots = parallel_create_temperature_plots(dfs, uef_values=uef, patterns=['T_WH', 'T_PCM'])
-    print(f"Temp chart processing pool time: {time.perf_counter() - _pool_time:.2f} seconds")
+    # _pool_time = time.perf_counter()
+    # all_plots = parallel_create_temperature_plots(dfs, uef_values=uef_last_day, patterns=['T_WH', 'T_PCM'])
+    # print(f"Temp chart processing pool time: {time.perf_counter() - _pool_time:.2f} seconds")
     
-    # # # # Display all plots
-    _plot_time = time.perf_counter()
-    parallel_display_plots(all_plots, stagger_delay=0.1)  # 0.1 second delay between plots
-    print(f"Temp chart display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # # # # # Display all plots
+    # _plot_time = time.perf_counter()
+    # parallel_display_plots(all_plots, stagger_delay=0.1)  # 0.1 second delay between plots
+    # print(f"Temp chart display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
-    _plot_time = time.perf_counter()
-    film_temp_charts, film_temp_metadata = create_deltaT_over_film_coeff_plots(dfs)
-    print(f"Film coeff plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # _plot_time = time.perf_counter()
+    # film_temp_charts, film_temp_metadata = create_deltaT_over_film_coeff_plots(dfs)
+    # print(f"Film coeff plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
-    _plot_time = time.perf_counter()
-    parallel_display_plots(film_temp_charts, stagger_delay=0.1)  # 0.1 second delay between plots
-    print(f"Film coeff plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # _plot_time = time.perf_counter()
+    # parallel_display_plots(film_temp_charts, stagger_delay=0.1)  # 0.1 second delay between plots
+    # print(f"Film coeff plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
-    _plot_time = time.perf_counter()
-    film_htc_charts, film_htc_metadata = create_film_htc_plots(dfs)
-    print(f"Film HTC plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # _plot_time = time.perf_counter()
+    # film_htc_charts, film_htc_metadata = create_film_htc_plots(dfs)
+    # print(f"Film HTC plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
-    _plot_time = time.perf_counter()
-    parallel_display_plots(film_htc_charts, stagger_delay=0.1)  # 0.1 second delay between plots
-    print(f"Film HTC plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # _plot_time = time.perf_counter()
+    # parallel_display_plots(film_htc_charts, stagger_delay=0.1)  # 0.1 second delay between plots
+    # print(f"Film HTC plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
     
     # _plot_time = time.perf_counter()
@@ -3644,16 +3662,18 @@ if __name__ == "__main__":
 
     # # Draw data summary
     _hot_water_delivered_pool_time = time.perf_counter()
-    output = calculate_hot_water_delivered(dfs, first_hour_test=False)
+    output = calculate_hot_water_delivered(dfs, first_hour_test=True)
     print(f"Hot water delivered pool time: {time.perf_counter() - _hot_water_delivered_pool_time:.2f} seconds")
     
     # _hot_water_plot_time = time.perf_counter()
     # plot_draw_event_summary(output)
     # print(f"Hot water plot time: {time.perf_counter() - _hot_water_plot_time:.2f} seconds")
     
+    # csv_path = export_draw_outputs_csv(output, "../OCHRE_results/results_csv/results_no_FHR_ADJUSTMENT.csv")
+    csv_path = export_draw_outputs_csv(output, "../OCHRE_results/results_csv/results_FHR_ADJUSTMENT.csv")
     
-    plot_draw_events(output)
-    plot_totals(output)
+    # plot_draw_events(output)
+    # plot_totals(output)
     
     # draw 2d matrix plot
     # plot_comparison(dfs, output)

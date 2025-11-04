@@ -3,21 +3,30 @@ import re
 import numpy as np
 import pandas as pd
 import multiprocessing as mp
+import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# from bin.run_pcm_wh_janelle import GAL_TO_L
+
+GAL_TO_L = 3.78541 # gallons to liters conversion
 
 # =========================
 # Core per-file computation
 # =========================
+
+
 def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_GAL_RATIO=0.264172):
     water_draw_col       = "Total Water Output (L/min)"
     water_output_W_col   = "Hot Water Delivered (W)"
+    water_draw_tank_col  = "Hot Water Delivered (L/min)"
+    inlet_temp_col       = "Hot Water Mains Temperature (C)"
     water_outlet_temp    = "Hot Water Outlet Temperature (C)"
     energy_used_col      = "Water Heating Delivered (W)"
     try:
         df_copy = df.copy()
 
         # --- prepare ---
-        max_water_volume_L       = 180  # fixed cap like your original
+        max_water_volume_L       = 0
         total_water_volume_L     = 0.0
         total_heat_delivered_J   = 0.0
         is_draw_active           = False
@@ -30,6 +39,14 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
         df_copy['time_delta'] = (
             pd.to_datetime(df_copy.index).to_series().diff().dt.total_seconds().fillna(0.0)
         )
+        
+        # compare begining and end timestamp to find length of test to determine maximum possible water volume
+        begining = df_copy['Time'].iloc[0]
+        end = df_copy['Time'].iloc[-1]
+        test_duration = datetime.datetime.strptime(end, '%Y-%m-%d %H:%M:%S.%f') - datetime.datetime.strptime(begining, '%Y-%m-%d %H:%M:%S.%f')
+        test_duration_mins = test_duration.total_seconds() / 60
+        water_draw = 3 #gpm from FHR
+        max_water_volume_L = test_duration_mins * water_draw * GAL_TO_L
 
         pcm_columns = [col for col in df_copy.columns if col.startswith('T_PCM')]
         if len(pcm_columns) > 0:
@@ -37,7 +54,7 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
             pcm_enthalpy_column   = 'Total PCM Enthalpy (J)'
             starting_pcm_enthalpy = df_copy[pcm_enthalpy_column].iloc[0]
             df_copy['average_pcm_temp'] = df_copy[pcm_columns].mean(axis=1)
-            df_copy['is_cutoff_temp']   = df_copy['average_pcm_temp'] < water_temp_cutoff
+            df_copy['is_cutoff_temp'] = df_copy[pcm_columns].lt(water_temp_cutoff).all(axis=1)
             try:
                 cutoff_index      = df_copy[df_copy['is_cutoff_temp']].index[0]
                 baseline_enthalpy = df_copy[pcm_enthalpy_column][cutoff_index]
@@ -56,7 +73,12 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
         # --- iterate rows ---
         for timestamp, row in df_copy.iterrows():
             flow_L_per_min = row[water_draw_col]
-            temp_C         = row[water_outlet_temp]
+            tank_L_per_min = row[water_draw_tank_col]
+            intlet_temp_C  = row[inlet_temp_col]
+            tank_outlet_temp_C         = row[water_outlet_temp]
+            tank_flow_percentage = tank_flow_percentage = (tank_L_per_min / flow_L_per_min) if flow_L_per_min not in (0, None) else 0
+            inlet_flow_percentage = 1-tank_flow_percentage
+            temp_C = (inlet_flow_percentage * intlet_temp_C) + (tank_flow_percentage * tank_outlet_temp_C) 
             heat_W         = row[water_output_W_col]
             dt             = float(row['time_delta'])
             if dt < 0 or not np.isfinite(dt):
@@ -136,8 +158,9 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
             prev  = draw_events[-2]
             dur = (final['end_time'] - final['start_time']).total_seconds()
             if dur >= 30 and final['max_temp'] >= water_temp_cutoff:
+                numerator = (final.get('avg_temp', final['min_temp']) - prev['min_temp'])
                 denom = (prev.get('avg_temp', prev['min_temp']) - prev['min_temp']) or 1.0
-                adj   = ((final.get('avg_temp', final['min_temp']) - prev['min_temp']) / denom)
+                adj   = numerator/denom
                 adjusted_gal           = (total_water_volume_gal - final['water_volume_gal']) + (final['water_volume_gal'] * adj)
                 total_water_volume_gal = adjusted_gal
                 total_water_volume_L   = total_water_volume_gal / 0.264172
@@ -164,8 +187,9 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
             'total_energy_used_kwh': total_energy_used_kwh,
             'total_heat_delivered_J': total_heat_delivered_J,
             'total_heat_delivered_kWh': total_heat_delivered_kWh,
-            'max_possible_hot_water': max_water_volume_L * 0.264172,
+            'max_possible_hot_water_gal': max_water_volume_L * 0.264172,
             'draw_events': draw_events,
+            'is_FHR': first_hour_test,
             'num_draw_events': len(draw_events)
         }
     except Exception as e:

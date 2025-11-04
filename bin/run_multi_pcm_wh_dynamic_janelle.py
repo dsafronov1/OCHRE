@@ -9,7 +9,7 @@ from ochre import (
     CreateFigures,
     ElectricResistanceWaterHeater,
 )
-from ochre.Models import TankWithMultiPCM, TankWithMultiPCMExternal
+from ochre.Models import TankWithMultiPCM
 from ochre.utils import convert
 import time
 from bin.run_dwelling import dwelling_args
@@ -57,8 +57,8 @@ DEFAULT_PCM_PROPERTIES = {
 
 num_points = 10
 
-sa_ratios = [30]
-h_values = [5000]
+sa_ratios = [14.7]
+# h_values = [5000]
 # 700 — 2200 in^2 for the MEPCM 66% vol fraction fill
 # sa_ratios = [0.673573, 0.817910, 0.962247, 1.106584, 1.250921, 1.395258, 1.539595, 1.683932, 1.828269, 1.972606, 2.116943]
 # 200-2000 in^2 for the backfilled 74% vol fraction fill
@@ -76,16 +76,17 @@ h_values = [5000]
 # ]
 
 # case 1 
-# sa_ratios = np.linspace(5, 20, num_points)
+# sa_ratios = np.linspace(2, 30, num_points)
 
 # case 2
 # sa_ratios = np.linspace(1, 16, num_points)
 
 # case 3
-sa_ratios = np.linspace(1, 50, num_points)
+# sa_ratios = np.linspace(1, 50, num_points)
 
 # h_values = np.linspace(np.log10(50), np.log10(5000), num_points)
-h_values = np.linspace(50, 5000, num_points)
+h_values = np.linspace(50, 5000, 20)
+# h_values = np.linspace(50, 5000, 20)
 
 # pcm_file_names = [f"cp_h-T_data_shifted_{i}F.csv" for i in range(110, 142, 2)]
 
@@ -96,9 +97,13 @@ simulation_duration_days = 220
 pcm_file_names = ['60-40_PCM55-TPU_cp-h-T.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_88frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_45frac.csv']
+# pcm_file_names = ['ct53_h-T_data_57frac.csv']
+# pcm_file_names = ['ct53_h-T_data_58frac.csv']
+# pcm_file_names = ['ct53_h-T_data_64frac.csv']
+# pcm_file_names = ['ct53_h-T_data_66frac.csv']
 
+# setpoint_temps_f = [140]
 setpoint_temps_f = [140]
-# setpoint_temps_f = [125, 140]
 setpoint_temps_c = [
     (setpoint_temp - 32) * (5 / 9) for setpoint_temp in setpoint_temps_f
 ]
@@ -110,10 +115,10 @@ tank_volume_gal = [40]
 # vol_fract = 0.00000001  # 1.540e-06 kg
 # vol_fract = 0.0001  # 1.540e-02 kg
 # vol_fract = 0.5  # 7.700e+01 kg
-vol_fracs = [0.66]
+# vol_fracs = [0.66]
 # vol_fracs = [0.74]
 # vol_fracs = [0.26]
-# vol_fracs = [0.5]
+vol_fracs = [0.67]
 
 # pcm_vol_fractions = [{i: vol_fract for i in range(1, n + 1)} for n in range(1, num_nodes + 1)]
 # pcm_vol_fractions = [
@@ -584,30 +589,102 @@ def calculate_net_water_energy(volume, temperature, temperature_difference):
 
 
 def calculate_uef(df, water_volume):
-    # calculate UEF of the water tank
-    Q_cons = (
-        df["Water Heating Electric Power (kW)"].sum() * 1000
-    )  # not sure if this is the correct term that I should be pulling
-    Q_load = df[
-        "Hot Water Delivered (W)"
-    ].sum()  # not sure if this is the correct term that I should be pulling
+    """
+    Calculate a single UEF value over the provided dataframe using time-integrated energy terms.
 
-    PCM_Q_Heat_to_Water = calculate_net_PCM_heat(df)  # make sure in W*min
-    PCM_net_enthalpy = calculate_net_PCM_enthalpy(df)
-    PCM_net_heat_loss = PCM_net_enthalpy / 60  # make sure in W*min
-    water_net_temp_delta = calculate_net_water_temp(df)
-    water_net_energy = (
-        calculate_net_water_energy(
-            water_volume,
-            df["Hot Water Average Temperature (C)"].iloc[-1],
-            water_net_temp_delta,
-        )
-        / 60
-    )  # make sure in W*min
-    Q_cons_total = Q_cons - PCM_net_heat_loss - water_net_energy  # make sure in W*min
-    UEF = Q_load / Q_cons_total
+    Differences vs previous version:
+      - Uses the DataFrame's DateTimeIndex for timing (no 'Time' column).
+      - Integrates power over variable dt (seconds) derived from the index.
 
-    return UEF
+    Requirements:
+      - df is indexed by datetime (or index parsable to datetime).
+      - Columns required:
+          'Water Heating Electric Power (kW)'  (instantaneous power)
+          'Hot Water Delivered (W)'            (instantaneous power)
+          'Hot Water Average Temperature (C)'  (for bulk-water energy adjustment)
+      - Optionally:
+          'Water Volume (L)' (if absent, uses the water_volume argument)
+      - Helper functions available in scope:
+          calculate_net_PCM_heat(df),
+          calculate_net_PCM_enthalpy(df),
+          calculate_net_water_temp(df),
+          calculate_net_water_energy(volume_L, T_final_C, delta_T_C)
+    Returns:
+      - float UEF, or np.nan if not computable
+    """
+
+    if df is None or len(df) == 0:
+        return np.nan
+
+    # Work on a copy to avoid mutating caller's df
+    local = df.copy()
+
+    # Ensure DateTimeIndex; try to coerce if not already
+    if not isinstance(local.index, pd.DatetimeIndex):
+        try:
+            local.index = pd.to_datetime(local.index, errors="coerce")
+        except Exception:
+            return np.nan
+
+    # Drop any NaT index rows that may result from coercion
+    local = local[~local.index.isna()]
+    if len(local) == 0:
+        return np.nan
+
+    # Sort by time and compute dt (seconds) from the index
+    local = local.sort_index()
+    # Use vectorized diff on the index to avoid alignment pitfalls
+    idx_vals = local.index.view("int64")  # nanoseconds since epoch
+    dt_s = np.diff(idx_vals, prepend=idx_vals[0]) / 1e9  # seconds; first element gets 0
+
+    # Validate required columns
+    required_cols = [
+        "Water Heating Electric Power (kW)",
+        "Hot Water Delivered (W)",
+        "Hot Water Average Temperature (C)",
+    ]
+    if any(col not in local.columns for col in required_cols):
+        return np.nan
+
+    # Integrate electric consumption: kW -> W, then multiply by seconds
+    Q_cons = np.sum((local["Water Heating Electric Power (kW)"].to_numpy() * 1000.0) * dt_s)
+
+    # Integrate delivered hot water energy: W * s
+    Q_load = np.sum(local["Hot Water Delivered (W)"].to_numpy() * dt_s)
+
+    # PCM and bulk-water state adjustments (energy terms over the window)
+    _PCM_Q_Heat_to_Water = calculate_net_PCM_heat(local)  # retained for parity; not used directly
+    PCM_net_enthalpy = calculate_net_PCM_enthalpy(local)  # energy (e.g., J = W·s)
+    PCM_net_heat_loss = PCM_net_enthalpy
+
+    water_net_temp_delta = calculate_net_water_temp(local)
+
+    # Determine effective water volume (L)
+    if "Water Volume (L)" in local.columns:
+        try:
+            water_volume_L = float(local["Water Volume (L)"].iloc[-1])
+        except Exception:
+            return np.nan
+    elif water_volume is not None:
+        try:
+            water_volume_L = float(water_volume)
+        except Exception:
+            return np.nan
+    else:
+        return np.nan  # insufficient info to compute bulk-water energy change
+
+    # Net energy for changing bulk water temperature over the interval (energy units)
+    T_final_C = float(local["Hot Water Average Temperature (C)"].iloc[-1])
+    water_net_energy = calculate_net_water_energy(water_volume_L, T_final_C, water_net_temp_delta)
+
+    # Adjusted consumption (subtract stored-state changes)
+    Q_cons_adjusted = Q_cons - PCM_net_heat_loss - water_net_energy
+
+    if not np.isfinite(Q_cons_adjusted) or Q_cons_adjusted == 0:
+        return np.nan
+
+    return Q_load / Q_cons_adjusted
+
 
 def run_water_heater_electric(default_args, setpoint_temp, tank_volume):
     # Create water draw schedule
@@ -694,8 +771,8 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
         "HPWH COP (-)": 4.5,
         "duration": duration,
         **default_args,
-        "time_res": dt.timedelta(minutes=1),
-        # "time_res": dt.timedelta(seconds=0.5),
+        # "time_res": dt.timedelta(minutes=1),
+        "time_res": dt.timedelta(seconds=0.5),
         "hp_only_mode": True
     }
 
@@ -920,7 +997,7 @@ if __name__ == "__main__":
                                 # Add PCM model with specific volume fraction
                                 model_name = convert_dict_to_name(pcm_vol_fraction)
 
-                                model_name = f"{model_name}_Heatpump_SA-{sa_ratio:.2f}_H-{h_value:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
+                                model_name = f"Case1_{model_name}_Heatpump_SA-{sa_ratio:.2f}_H-{h_value:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
                                 i += 1
                                 current_default_args = add_pcm_model(
                                     current_default_args,
