@@ -57,7 +57,7 @@ DEFAULT_PCM_PROPERTIES = {
 
 num_points = 10
 
-sa_ratios = [14.7]
+# sa_ratios = [14.7]
 # h_values = [5000]
 # 700 — 2200 in^2 for the MEPCM 66% vol fraction fill
 # sa_ratios = [0.673573, 0.817910, 0.962247, 1.106584, 1.250921, 1.395258, 1.539595, 1.683932, 1.828269, 1.972606, 2.116943]
@@ -82,10 +82,10 @@ sa_ratios = [14.7]
 # sa_ratios = np.linspace(1, 16, num_points)
 
 # case 3
-# sa_ratios = np.linspace(1, 50, num_points)
+sa_ratios = np.linspace(1, 50, num_points)
 
 # h_values = np.linspace(np.log10(50), np.log10(5000), num_points)
-h_values = np.linspace(50, 5000, 20)
+h_values = np.linspace(50, 5000, num_points)
 # h_values = np.linspace(50, 5000, 20)
 
 # pcm_file_names = [f"cp_h-T_data_shifted_{i}F.csv" for i in range(110, 142, 2)]
@@ -94,12 +94,16 @@ h_values = np.linspace(50, 5000, 20)
 simulation_duration_days = 220
 
 # pcm_file_names = ['cp_h-T_data_shifted_120F.csv']
-pcm_file_names = ['60-40_PCM55-TPU_cp-h-T.csv']
+# pcm_file_names = ['60-40_PCM55-TPU_cp-h-T.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_88frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_45frac.csv']
 # pcm_file_names = ['ct53_h-T_data_57frac.csv']
 # pcm_file_names = ['ct53_h-T_data_58frac.csv']
 # pcm_file_names = ['ct53_h-T_data_64frac.csv']
+# pcm_file_names = ['ct53_h-T_data_66frac.csv']
+pcm_file_names = ['ct53-resin_h-T_data_88frac.csv']
+# pcm_file_names = ['ct53-resin_h-T_data_77frac.csv']
+# pcm_file_names = ['ct53-resin_h-T_data_55frac.csv']
 # pcm_file_names = ['ct53_h-T_data_66frac.csv']
 
 # setpoint_temps_f = [140]
@@ -107,6 +111,8 @@ setpoint_temps_f = [140]
 setpoint_temps_c = [
     (setpoint_temp - 32) * (5 / 9) for setpoint_temp in setpoint_temps_f
 ]
+
+case_value = "Case5"
 
 # tank_volume_gal = [40,50, 65]
 tank_volume_gal = [40]
@@ -116,9 +122,9 @@ tank_volume_gal = [40]
 # vol_fract = 0.0001  # 1.540e-02 kg
 # vol_fract = 0.5  # 7.700e+01 kg
 # vol_fracs = [0.66]
-# vol_fracs = [0.74]
+vol_fracs = [0.74]
 # vol_fracs = [0.26]
-vol_fracs = [0.67]
+# vol_fracs = [0.61]
 
 # pcm_vol_fractions = [{i: vol_fract for i in range(1, n + 1)} for n in range(1, num_nodes + 1)]
 # pcm_vol_fractions = [
@@ -997,7 +1003,7 @@ if __name__ == "__main__":
                                 # Add PCM model with specific volume fraction
                                 model_name = convert_dict_to_name(pcm_vol_fraction)
 
-                                model_name = f"Case1_{model_name}_Heatpump_SA-{sa_ratio:.2f}_H-{h_value:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
+                                model_name = f"{case_value}_{model_name}_Heatpump_SA-{sa_ratio:.2f}_H-{h_value:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
                                 i += 1
                                 current_default_args = add_pcm_model(
                                     current_default_args,

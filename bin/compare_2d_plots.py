@@ -781,8 +781,10 @@ def plot_2d_comparison_generic(dfs, draw_outputs, x_column_pattern, y_column_pat
             logger.error(f"Exception plotting {z_col}: {e}\n{traceback.format_exc()}")
             return None
 
+    name = "Case 5 66% Resin PCM 61% Loading"
+    
     title_total = (
-        f"MEPCM 66% Loading First-Hour Rating:<br>{y_column_pattern} vs SA/V Ratio "
+        f"{name} First-Hour Rating:<br>{y_column_pattern} vs SA/V Ratio "
         f"Cutoff=110°F; Setpoint={setpoint}°F; PCM Melt={pcm_temp}°F<br>Tank Size: {tank_size} gal"
     )
     fig_total_water = _safe_plot(
@@ -793,7 +795,7 @@ def plot_2d_comparison_generic(dfs, draw_outputs, x_column_pattern, y_column_pat
     )
 
     title_first = (
-        f"MEPCM 66% Loading Initial Draw Rating:<br>{y_column_pattern} vs SA/V Ratio "
+        f"{name} Initial Draw Rating:<br>{y_column_pattern} vs SA/V Ratio "
         f"Cutoff=110°F; Setpoint={setpoint}°F; PCM Melt={pcm_temp}°F<br>Tank Size: {tank_size} gal"
     )
     fig_firstdraw_water = _safe_plot(

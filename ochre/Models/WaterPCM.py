@@ -1232,6 +1232,8 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         nu_f = mu / max(rho, 1e-12)
         g = 9.81
         beta_z = 1.0 / np.maximum(T_fluid_K, 1e-9)  # Boussinesq β≈1/T (per node)
+        # water beta_z
+        # beta_z = - (1 / rho) * drho_dT;
 
         # ---------- draw rate → velocity ----------
         Q_draw_val = float(max(getattr(self, "draw_total", 0.0), 0.0))

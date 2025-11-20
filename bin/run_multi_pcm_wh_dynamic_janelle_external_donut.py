@@ -79,7 +79,7 @@ pcm_file_names = ['cp_h-T_data_52_6C.csv']
 # pcm_file_names = [f'90%_cp_h-T_data_shifted_{i}F.csv' for i in range(110, 142, 1)]
 
 # setpoint_temps_f = [140]
-setpoint_temps_f = [125, 140]
+setpoint_temps_f = [140]
 setpoint_temps_c = [
     (setpoint_temp - 32) * (5 / 9) for setpoint_temp in setpoint_temps_f
 ]
@@ -91,7 +91,7 @@ setpoint_temps_c = [
 
 films_h = [150]
 # pcms_thickness_in = [0.001,0.1,0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
-pcms_thickness_in = [0.001]
+pcms_thickness_in = [1]
 pcms_segment_thickness_inches = [0.1]
 # pcms_segment_thickness_inches = [1.2]
 
@@ -170,7 +170,7 @@ default_args = {
     "save_results": None,  # if True, must specify output_path # None Merges the simulator results into 1 file
     "output_path": '../OCHRE_output/OCHRE_results/results/',
     "name": "ZDefault_ElectricResistanceWaterHeater",
-    "schedule_input_file": load_profile,
+    # "schedule_input_file": load_profile,
 }
 
 def import_water_heating_schedule(schedule_file):
@@ -693,8 +693,8 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
         "HPWH COP (-)": 4.2, #adjusted from bigladder
         "duration": duration,
         **default_args,
-        "time_res": dt.timedelta(minutes=1),
-        # "time_res": dt.timedelta(seconds=0.5),
+        # "time_res": dt.timedelta(minutes=1),
+        "time_res": dt.timedelta(seconds=0.5),
         "hp_only_mode": True
     }
 
