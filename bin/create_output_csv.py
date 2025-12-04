@@ -105,10 +105,11 @@ def export_draw_outputs_csv(draw_outputs, csv_path="../OCHRE_results/results_csv
             "gallons": None,
             "run_index": None,
         }
-        m = re.search(r"(?:^|_)Case(?P<case>\d+)(?:_|$)", name, re.IGNORECASE)
+        m = re.search(r"(?:^|_)Case(?P<case>[A-Za-z0-9-.]+)(?:_|$)", name, re.IGNORECASE)
         if m:
-            out["case"] = int(m.group("case"))
-        m = re.search(r"Case\d+_(?P<fill>\d*\.?\d+)(?:_|$)", name, re.IGNORECASE)
+            case_token = m.group("case")
+            out["case"] = int(case_token) if case_token.isdigit() else case_token
+        m = re.search(r"Case[A-Za-z0-9.-]+_(?P<fill>\d*\.?\d+)(?:_|$)", name, re.IGNORECASE)
         if m:
             out["fill_fraction"] = float(m.group("fill"))
         if "No_PCM" in name:

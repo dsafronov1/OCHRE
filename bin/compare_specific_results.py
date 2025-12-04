@@ -22,11 +22,17 @@ from create_output_csv import export_draw_outputs_csv
 L_TO_GAL_RATIO = 0.264172
 
 def load_data(results_folder='../OCHRE_output/results/'):
-    """Load CSV files from the results folder into a dictionary of DataFrames."""
     csv_files = [f for f in os.listdir(results_folder) if f.endswith('.csv')]
     if len(csv_files) < 2:
         raise ValueError("At least 2 CSV files are required in the 'results' folder for comparison.")
-    return {file: pd.read_csv(os.path.join(results_folder, file)) for file in csv_files}
+
+    def _load_one(name):
+        return name, pd.read_csv(os.path.join(results_folder, name))
+
+    with ThreadPoolExecutor() as ex:
+        out = dict(ex.map(_load_one, csv_files))
+
+    return out
 
 def find_matching_columns(df, patterns):
     """Find columns that match the given patterns and group them.
@@ -3601,52 +3607,52 @@ if __name__ == "__main__":
     uef_last_day = [x['uef_last_day'] for x in uef_totals]
     print(f"UEF calculation time: {time.perf_counter() - _uef_time:.2f} seconds")
 
-    _pool_time = time.perf_counter()
-    all_plots = parallel_create_temperature_plots(dfs, uef_values=uef_last_day, patterns=['T_WH', 'T_PCM'])
-    print(f"Temp chart processing pool time: {time.perf_counter() - _pool_time:.2f} seconds")
+    # _pool_time = time.perf_counter()
+    # all_plots = parallel_create_temperature_plots(dfs, uef_values=uef_last_day, patterns=['T_WH', 'T_PCM'])
+    # print(f"Temp chart processing pool time: {time.perf_counter() - _pool_time:.2f} seconds")
     
-    # # # # Display all plots
-    _plot_time = time.perf_counter()
-    parallel_display_plots(all_plots, stagger_delay=0.1)  # 0.1 second delay between plots
-    print(f"Temp chart display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # # # # # Display all plots
+    # _plot_time = time.perf_counter()
+    # parallel_display_plots(all_plots, stagger_delay=0.1)  # 0.1 second delay between plots
+    # print(f"Temp chart display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
-    _plot_time = time.perf_counter()
-    film_temp_charts, film_temp_metadata = create_deltaT_over_film_coeff_plots(dfs)
-    print(f"Film coeff plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # _plot_time = time.perf_counter()
+    # film_temp_charts, film_temp_metadata = create_deltaT_over_film_coeff_plots(dfs)
+    # print(f"Film coeff plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
-    _plot_time = time.perf_counter()
-    parallel_display_plots(film_temp_charts, stagger_delay=0.1)  # 0.1 second delay between plots
-    print(f"Film coeff plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # _plot_time = time.perf_counter()
+    # parallel_display_plots(film_temp_charts, stagger_delay=0.1)  # 0.1 second delay between plots
+    # print(f"Film coeff plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
-    _plot_time = time.perf_counter()
-    film_htc_charts, film_htc_metadata = create_film_htc_plots(dfs)
-    print(f"Film HTC plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # _plot_time = time.perf_counter()
+    # film_htc_charts, film_htc_metadata = create_film_htc_plots(dfs)
+    # print(f"Film HTC plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
-    _plot_time = time.perf_counter()
-    parallel_display_plots(film_htc_charts, stagger_delay=0.1)  # 0.1 second delay between plots
-    print(f"Film HTC plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # _plot_time = time.perf_counter()
+    # parallel_display_plots(film_htc_charts, stagger_delay=0.1)  # 0.1 second delay between plots
+    # print(f"Film HTC plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
     
-    _plot_time = time.perf_counter()
-    film_htc_charts, film_htc_metadata = create_deltaT_vs_film_coeff_scatter(dfs)
-    print(f"Film HTC plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # _plot_time = time.perf_counter()
+    # film_htc_charts, film_htc_metadata = create_deltaT_vs_film_coeff_scatter(dfs)
+    # print(f"Film HTC plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
-    _plot_time = time.perf_counter()
-    parallel_display_plots(film_htc_charts, stagger_delay=0.1)  # 0.1 second delay between plots
-    print(f"Film HTC plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # _plot_time = time.perf_counter()
+    # parallel_display_plots(film_htc_charts, stagger_delay=0.1)  # 0.1 second delay between plots
+    # print(f"Film HTC plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
-    _plot_time = time.perf_counter()
-    dt_charts, dt_metadata = create_deltaT_over_time_plots(dfs)
-    print(f"ΔT over time plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # _plot_time = time.perf_counter()
+    # dt_charts, dt_metadata = create_deltaT_over_time_plots(dfs)
+    # print(f"ΔT over time plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
-    _plot_time = time.perf_counter()
-    parallel_display_plots(dt_charts, stagger_delay=0.1)  # 0.1 second delay between plots
-    print(f"ΔT over time plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # _plot_time = time.perf_counter()
+    # parallel_display_plots(dt_charts, stagger_delay=0.1)  # 0.1 second delay between plots
+    # print(f"ΔT over time plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
     
     
     # _plot_time = time.perf_counter()
-    # all_plots = parallel_create_energy_output_plots(dfs, uef_values=uef, patterns=['T_WH', 'T_PCM'])
+    # all_plots = parallel_create_energy_output_plots(dfs, uef_values=uef_last_day, patterns=['T_WH', 'T_PCM'])
     # print(f"Energy output processing pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
     # _plot_time = time.perf_counter()
@@ -3670,10 +3676,10 @@ if __name__ == "__main__":
     # print(f"Hot water plot time: {time.perf_counter() - _hot_water_plot_time:.2f} seconds")
     
     # csv_path = export_draw_outputs_csv(output, "../OCHRE_results/results_csv/results_no_FHR_ADJUSTMENT.csv")
-    # csv_path = export_draw_outputs_csv(output, "../OCHRE_results/results_csv/results_FHR_ADJUSTMENT.csv")
+    csv_path = export_draw_outputs_csv(output, "../OCHRE_results/results_csv/results_FHR_ADJUSTMENT.csv")
     
-    plot_draw_events(output)
-    plot_totals(output)
+    # plot_draw_events(output)
+    # plot_totals(output)
     
     # draw 2d matrix plot
     # plot_comparison(dfs, output)

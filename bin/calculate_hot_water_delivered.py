@@ -41,9 +41,9 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
         )
         
         # compare begining and end timestamp to find length of test to determine maximum possible water volume
-        begining = df_copy['Time'].iloc[0]
+        beginning = df_copy['Time'].iloc[0]
         end = df_copy['Time'].iloc[-1]
-        test_duration = datetime.datetime.strptime(end, '%Y-%m-%d %H:%M:%S.%f') - datetime.datetime.strptime(begining, '%Y-%m-%d %H:%M:%S.%f')
+        test_duration = parse_timestamp_to_string(end) - parse_timestamp_to_string(beginning)
         test_duration_mins = test_duration.total_seconds() / 60
         water_draw = 3 #gpm from FHR
         max_water_volume_L = test_duration_mins * water_draw * GAL_TO_L
@@ -205,6 +205,15 @@ def _process_file_path(args):
     file_key, path, first_hour_test, read_csv_kwargs = args
     df = pd.read_csv(path, **(read_csv_kwargs or {}))
     return _process_core(file_key, df, first_hour_test)
+
+def parse_timestamp_to_string(date_str):
+    try:
+        # Try with fractional seconds first
+        return datetime.datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S.%f')
+    except ValueError:
+        # Fallback to whole seconds
+        return datetime.datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+    
 
 # ======================================================
 # Public APIs: choose one depending on how your data is

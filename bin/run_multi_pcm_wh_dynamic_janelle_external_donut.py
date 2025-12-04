@@ -938,7 +938,7 @@ if __name__ == "__main__":
                                             model_name = convert_dict_to_name(pcm_vol_fraction)
 
                                             # model_name = f"Heatpump_thickness-{external_pcm_thickness_in:.2f}_segment_thickness-{pcm_segment_thickness_inches:.2f}_water_side_film_h-{film_h:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
-                                            model_name = f"Heatpump_thickness-{external_pcm_thickness_in:.2f}_segment_thickness-{pcm_segment_thickness_inches:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
+                                            model_name = f"Adjusted_water_beta_z_Heatpump_thickness-{external_pcm_thickness_in:.2f}_segment_thickness-{pcm_segment_thickness_inches:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
                                             i += 1
                                             current_default_args = add_pcm_model(
                                                 current_default_args,

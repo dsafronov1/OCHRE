@@ -1195,6 +1195,56 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
             Pr  = cp * mu / max(k, 1e-12)
             return rho, mu, k, cp, Pr
 
+        def water_density_and_beta_lut(T_C):
+            """
+            LUT-based density and beta for water at 1 atm.
+
+            Inputs:
+              T_C : np.ndarray [°C]
+
+            Outputs:
+              rho  : density [kg/m³]
+              beta : volumetric thermal expansion [1/°C],
+                     beta = -(1/rho) * dρ/dT from LUT slope
+            """
+            _TEMPS = np.array([0, 4, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100], dtype=float)
+            _DENSITIES = np.array(
+                [
+                    999.8,
+                    1000.0,
+                    999.7,
+                    998.2,
+                    995.7,
+                    992.2,
+                    988.1,
+                    983.2,
+                    977.8,
+                    971.8,
+                    965.3,
+                    958.4,
+                ],
+                dtype=float,
+            )
+
+            T = np.asarray(T_C, dtype=float)
+            T_clipped = np.clip(T, _TEMPS[0], _TEMPS[-1])
+
+            # Interpolated density
+            rho = np.interp(T_clipped, _TEMPS, _DENSITIES)
+
+            # Piecewise-linear slope dρ/dT between LUT knots
+            idx = np.searchsorted(_TEMPS, T_clipped, side="right") - 1
+            idx = np.clip(idx, 0, len(_TEMPS) - 2)
+
+            d_rho = _DENSITIES[idx + 1] - _DENSITIES[idx]
+            d_T   = _TEMPS[idx + 1] - _TEMPS[idx]
+            drho_dT = d_rho / d_T
+
+            rho_safe = np.where(rho == 0.0, 1e-12, rho)
+            beta = - (drho_dT / rho_safe)
+
+            return rho, beta
+
         # ---------- geometry ----------
         r = float(self.tank_radius_m)
         H = float(getattr(self, "tank_height_m", 2.0 * r))
@@ -1228,12 +1278,12 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
 
         # ---------- properties at mean fluid T ----------
         T_mean_C = float(np.nanmean(T_fluid_C))
-        rho, mu, k_f, cp, Pr_f = water_props_C(T_mean_C)
-        nu_f = mu / max(rho, 1e-12)
+        rho_mean, mu, k_f, cp, Pr_f = water_props_C(T_mean_C)
+        nu_f = mu / max(rho_mean, 1e-12)
         g = 9.81
-        beta_z = 1.0 / np.maximum(T_fluid_K, 1e-9)  # Boussinesq β≈1/T (per node)
-        # water beta_z
-        # beta_z = - (1 / rho) * drho_dT;
+
+        # water beta_z using LUT-based density slope
+        rho_nodes, beta_z = water_density_and_beta_lut(T_fluid_C)  # beta_z is per node
 
         # ---------- draw rate → velocity ----------
         Q_draw_val = float(max(getattr(self, "draw_total", 0.0), 0.0))
@@ -1273,7 +1323,6 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         )
         if Q_draw_m3s <= 0.0:
             Nu_forced[:] = 0.0
-
 
         # ---------- mixed convection PER NODE ----------
         n_blend = 3.0
