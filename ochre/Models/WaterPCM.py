@@ -20,53 +20,63 @@ from ochre.utils import schedule
 
 # PCM properties from manufacturer, same units as water properties
 DEFAULT_PCM_PROPERTIES = {
-    "t_m1": 50,  # C
-    "t_m2": 55,  # C
-    "h_fus": 226,  # J/g
     "h": 600,  # W/m^2K
-    "sa_ratio": 15, # m^2/m^3 of total pcm volume
-    "h_conv": 100,  # W/K, accounts for surface area (ha)
-    "setpoint_temp": 60,
+    "sa_ratio": 15, # m^2/m^3 of total pcm heat exchanger volume
+    "h_conv": 100,  # W/m^2-K, accounts for surface area (ha)
     "solid": {
-        "pcm_density": 0.904,  # g/cm**3
+        "pcm_density": 0.904,  # g/cm^3
         "pcm_cp": 0.6,  # J/g-C # adjusted by real measurements average from 0-45c
-        "pcm_conductivity":10,  # W/m-C, not used
-        # "pcm_c": 1717.6,  # J/m**3-C, not used
+        "pcm_conductivity":0.2,  # W/m-C
     },
-    "liquid": {
-        "pcm_density": 0.829,  # g/cm**3
-        "pcm_cp": 1.33,  # J/g-C # adjusted by real measurements average from 55-100c
-        "pcm_conductivity": 2.6,  # W/m-C, not used
-        # "pcm_c": 1823.8,  # J/m**3-C, not used
-    },
-    "enthalpy_lut": np.loadtxt(os.path.join(os.path.dirname(__file__), "../defaults/pcm_configs/cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1)
+    "enthalpy_lut_file": "cp_h-T_data_shifted_120F.csv",
 }
 
-def calculate_interpolation_data(pcm_properties):
-    temps = pcm_properties['enthalpy_lut'][:, 0].astype(float)
+def _normalize_pcm_properties(pcm_properties: Optional[Dict]) -> Dict:
+    if pcm_properties is None:
+        pcm_properties = {}
+
+    props = {k: v for k, v in pcm_properties.items() if k not in ("solid", "enthalpy_lut")}
+    solid = pcm_properties.get("solid", {})
+    normalized = {**DEFAULT_PCM_PROPERTIES, **props}
+    normalized["solid"] = {**DEFAULT_PCM_PROPERTIES["solid"], **solid}
+    return normalized
+
+def _resolve_enthalpy_lut_file(pcm_properties: Dict) -> str:
+    pcm_file = pcm_properties.get("enthalpy_lut_file") or DEFAULT_PCM_PROPERTIES["enthalpy_lut_file"]
+    if isinstance(pcm_file, os.PathLike):
+        pcm_file = os.fspath(pcm_file)
+    if not isinstance(pcm_file, str):
+        raise TypeError("enthalpy_lut_file must be a filename string.")
+    return pcm_file
+
+def _load_enthalpy_lut(pcm_file: str) -> np.ndarray:
+    full_path = os.path.join(os.path.dirname(__file__), f"../defaults/pcm_configs/{pcm_file}")
+    return np.loadtxt(full_path, delimiter=",", skiprows=1)
+
+def calculate_interpolation_data(enthalpy_lut):
+    temps = enthalpy_lut[:, 0].astype(float)
     # Convert all values if any appear to be in Kelvin
     if np.any(temps > 273.15):
         temps = temps - 273.15
 
-    specific_heats = pcm_properties['enthalpy_lut'][:, 1].astype(float)  # J/g
-    enthalpies = pcm_properties['enthalpy_lut'][:, 2].astype(float)      # J/g
+    specific_heats = enthalpy_lut[:, 1].astype(float)  # J/g
+    enthalpies = enthalpy_lut[:, 2].astype(float)      # J/g
     return temps, specific_heats, enthalpies
 
 
 
 
-def get_pcm_enthalpy(t_pcm, pcm_properties):
+def get_pcm_enthalpy(t_pcm, enthalpy_lut):
     '''look up the enthalpy of the PCM using an interpolated LUT'''
     # col 1 : t_pcm (C), col 2 : cp (J/(gC)), col 3 : enthalpy (J/kg)
     # must be in ascending sorted order by t_pcm
-    if t_pcm < pcm_properties["enthalpy_lut"][0,0] or t_pcm > pcm_properties["enthalpy_lut"][-1,0]:
-        raise ValueError(f"t_pcm {t_pcm} is outside the range of the LUT [{pcm_properties['enthalpy_lut'][0,0]} to {pcm_properties['enthalpy_lut'][-1,0]}]")
+    if t_pcm < enthalpy_lut[0,0] or t_pcm > enthalpy_lut[-1,0]:
+        raise ValueError(f"t_pcm {t_pcm} is outside the range of the LUT [{enthalpy_lut[0,0]} to {enthalpy_lut[-1,0]}]")
     
-    lut = pcm_properties["enthalpy_lut"]
-    idx = (lut[:,0] <= t_pcm).nonzero()[0][-1]
+    idx = (enthalpy_lut[:,0] <= t_pcm).nonzero()[0][-1]
     
-    t_low, t_high = lut[idx:idx+2, 0]
-    h_low, h_high = lut[idx:idx+2, 2]
+    t_low, t_high = enthalpy_lut[idx:idx+2, 0]
+    h_low, h_high = enthalpy_lut[idx:idx+2, 2]
     
     return h_low + (t_pcm - t_low) * (h_high - h_low) / (t_high - t_low)
 
@@ -89,7 +99,10 @@ class TankWithPCM(StratifiedWaterModel):
         
         super().__init__(**kwargs)
         
-        self.pcm_properties = pcm_properties
+        self.pcm_properties = _normalize_pcm_properties(pcm_properties)
+        pcm_file = _resolve_enthalpy_lut_file(self.pcm_properties)
+        self.pcm_properties["enthalpy_lut_file"] = pcm_file
+        self.enthalpy_lut = _load_enthalpy_lut(pcm_file)
 
         # Bounds check for pcm_vol_fraction for stability
         if not (6.582730627258115e-08 <= self.pcm_vol_fraction <= 0.9999999999999725):
@@ -97,7 +110,7 @@ class TankWithPCM(StratifiedWaterModel):
         if self.pcm_vol_fraction < 0.01 or self.pcm_vol_fraction > 0.99:
             self.warn(f"pcm_vol_fraction {pcm_vol_fraction} is outside the recommended range (0.01 to 0.99). Results may be inaccurate.")
         
-        self.key_temp, self.specific_heats, self.key_enthalpy = calculate_interpolation_data(**self.pcm_properties)
+        self.key_temp, self.specific_heats, self.key_enthalpy = calculate_interpolation_data(self.enthalpy_lut)
         self.key_enthalpy *= self.pcm_mass  # in J
 
         # PCM state and input indices
@@ -207,14 +220,19 @@ class TankWithMultiPCM(StratifiedWaterModel):
         self.external_nodes = ['AMB']
         self.pcm_heat_to_water_rc_network = None
         self.enthalpy_pcm = None
-        self.pcm_properties = pcm_properties
-
+        self.pcm_properties = _normalize_pcm_properties(pcm_properties)
+        pcm_file = _resolve_enthalpy_lut_file(self.pcm_properties)
+        self.pcm_properties["enthalpy_lut_file"] = pcm_file
+        self.enthalpy_lut = _load_enthalpy_lut(pcm_file)
+        self.h = self.pcm_properties['h']
+        self.ha = self.pcm_properties['h_conv']
+        self.conductivity= self.pcm_properties['solid']['pcm_conductivity']
+        self.key_temp, self.key_specific_heats, self.key_enthalpy = calculate_interpolation_data(self.enthalpy_lut)
         
-        pcm_file = self.pcm_properties.get('enthalpy_lut') or 'cp_h-T_data_52_6C.csv'
-        full_path = os.path.join(os.path.dirname(__file__), f"../defaults/pcm_configs/{pcm_file}")
-        self.pcm_properties['enthalpy_lut'] = np.loadtxt(full_path, delimiter=",", skiprows=1)
-        self.pcm_properties['enthalpy_lut_file'] = pcm_file
+        print(f"PCM enthalpy LUT file: {pcm_file} for case ha:{self.ha:.2f} with sa_ratio:{self.pcm_properties['sa_ratio']:.2f}")
 
+        # pcm_cp cache between
+        self._pcm_cp_cache: dict[tuple[float, ...], np.ndarray] = {}
         
         super().__init__(**kwargs)
         # self.n_nodes = len(self.output_names)
@@ -225,10 +243,6 @@ class TankWithMultiPCM(StratifiedWaterModel):
         #         raise ValueError(f"pcm_node: {node} vol_fraction {vol_fraction} must be between 6.582730627258115e-08 and 0.9999999999999725 to ensure stability.")
         #     if vol_fraction < 0.01 or vol_fraction> 0.85:
         #         self.warn(f"pcm_node: {node} pcm_vol_fraction {vol_fraction} is outside the recommended range (0.01 to 0.99). Results may be inaccurate.")
-        self.h = self.pcm_properties['h']
-        self.ha = self.pcm_properties['h_conv']
-        self.conductivity= self.pcm_properties['solid']['pcm_conductivity']
-        self.key_temp, self.key_specific_heats, self.key_enthalpy = calculate_interpolation_data(self.pcm_properties)
         # self.time_res = datetime.timedelta(seconds=5)
 
         # PCM state and input indices
@@ -237,12 +251,6 @@ class TankWithMultiPCM(StratifiedWaterModel):
         assert [self.state_names.index(f"T_WH{node}") for node in self.pcm_water_nodes] == self.t_pcm_wh_idx
         self.h_pcm_wh_idx = [self.input_names.index(f"H_WH{node}") for node in self.pcm_water_nodes]
         
-        # Iteration variables
-        self.iter = 0
-        self.max_iter = 600
-        self.epsilon = 1e-3
-        self.step_num = 0
-
         # PCM results variables
         self.pcm_heat_to_water = None  # in W
         # t_pcm = self.states[self.t_pcm_idx]  # PCM temperature, in C
@@ -301,7 +309,7 @@ class TankWithMultiPCM(StratifiedWaterModel):
             total_pcm_mass += pcm_mass
             
             # Add PCM capacitance for this node (in J/K)
-            pcm_cp = np.interp(start_temp, self.pcm_properties['enthalpy_lut'][:,0], self.pcm_properties['enthalpy_lut'][:,1])
+            pcm_cp = np.interp(start_temp, self.enthalpy_lut[:,0], self.enthalpy_lut[:,1])
             c_pcm_dict[f"C_PCM{node}"] = pcm_cp * pcm_mass
             # c_pcm_dict[f"C_PCM{node}"] = 1e-3
             
@@ -330,6 +338,8 @@ class TankWithMultiPCM(StratifiedWaterModel):
         rc_params.update(r_wh_pcm_dict)
         rc_params.update(r_pcm_amb_dict)
         rc_params.update(r_pcm_pcm_dict)
+
+
         
         # Subtract the total PCM volume from the global water volume
         # TODO - add in option to do external pcm volumes
@@ -345,9 +355,12 @@ class TankWithMultiPCM(StratifiedWaterModel):
     
     def update_rc_network(self, t_pcm, **kwargs):
         '''Get the dynamic specific heat for each of the pcm nodes and update the capacitance in the rc_network'''
-        
-        pcm_specific_heats = np.interp(t_pcm, self.key_temp, self.key_specific_heats)
-        
+        cache_key = tuple(np.round(t_pcm, 3))
+        pcm_specific_heats = self._pcm_cp_cache.get(cache_key)
+        if pcm_specific_heats is None:
+            pcm_specific_heats = np.interp(t_pcm, self.key_temp, self.key_specific_heats)
+            self._pcm_cp_cache[cache_key] = pcm_specific_heats
+
 
         # Loop over each PCM node and apply the modifications
         for i, node in enumerate(self.pcm_water_nodes):
@@ -539,21 +552,25 @@ class TankWithMultiPCM(StratifiedWaterModel):
         # Note: most results are included in Dwelling/WH. Only inputs and states are saved to self.results
         results = super().generate_results()
 
+        if self.verbosity >= 3:
+            results['Total PCM Enthalpy (J)'] = self.enthalpy_pcm.sum()
+            results['Delta Total PCM Enthalpy (J)'] = self.delta_enthalpy_pcm.sum()
+            results['Total PCM Heat Injected (W)'] = self.pcm_heat_to_water_rc_network.sum()
+
         if self.verbosity >= 6:
             
             for i, idx in enumerate(self.t_pcm_idx):
                 results[f"Water Tank PCM{self.t_pcm_wh_idx[i]+1} Temperature (C)"] = self.states[idx]
                 results[f"Water Tank PCM{self.t_pcm_wh_idx[i]+1} Water Temperature (C)"] = self.states[self.t_pcm_wh_idx[i]]
                 results[f"Water Tank PCM{self.t_pcm_wh_idx[i]+1} Enthalpy (J)"] = self.enthalpy_pcm[i]
+                results[f"Water Tank PCM{self.t_pcm_wh_idx[i]+1} Enthalpy Delta (J)"] = self.delta_enthalpy_pcm[i]
                 results[f"Water Tank PCM{self.t_pcm_wh_idx[i]+1} Heat Injected (W)"] = self.pcm_heat_to_water_rc_network[i]
                 results[f"Water Tank PCM{self.t_pcm_wh_idx[i]+1} Capacitance (J/K)"] = self.capacitances[idx]
                 results[f"Water Tank PCM{self.t_pcm_wh_idx[i]+1} h (W/m^2K)"] = self.pcm_node_properties[self.t_pcm_wh_idx[i]+1]['h']
                 results[f"Water Tank PCM{self.t_pcm_wh_idx[i]+1} volume (L)"] = self.pcm_node_properties[self.t_pcm_wh_idx[i]+1]['volume[L]']
                 results[f"Water Tank PCM{self.t_pcm_wh_idx[i]+1} sa_ratio"] = self.pcm_node_properties[self.t_pcm_wh_idx[i]+1]['sa_ratio']
                 
-            results['Total PCM Enthalpy (J)'] = self.enthalpy_pcm.sum()
-            results['Delta Total PCM Enthalpy (J)'] = self.delta_enthalpy_pcm.sum()
-            results['Total PCM Heat Injected (W)'] = self.pcm_heat_to_water_rc_network.sum()
+            
             results['PCM Mass (kg)'] = self.pcm_mass_kg
             results['Water Volume (L)'] = self.volume
 
@@ -598,7 +615,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         """
         IN_TO_M = 0.0254
         # Store material properties
-        self.pcm_properties = pcm_properties.copy()
+        self.pcm_properties = _normalize_pcm_properties(pcm_properties)
         self.insulation_k_value = insulation_k_value
         self.insulation_cp_value = insulation_cp_value
         self.insulation_density = insulation_density
@@ -612,10 +629,9 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
 
         # ------------------------------------------------------------------
         # Pre‑load PCM enthalpy lookup table
-        pcm_file = self.pcm_properties.get("enthalpy_lut", "cp_h-T_data_52_6C.csv")
-        full_path = os.path.join(os.path.dirname(__file__), f"../defaults/pcm_configs/{pcm_file}")
-        self.pcm_properties["enthalpy_lut"] = np.loadtxt(full_path, delimiter=",", skiprows=1)
+        pcm_file = _resolve_enthalpy_lut_file(self.pcm_properties)
         self.pcm_properties["enthalpy_lut_file"] = pcm_file
+        self.enthalpy_lut = _load_enthalpy_lut(pcm_file)
 
         # Fallback for water‑side film‑coefficient
         self.water_side_film_h = self.pcm_properties.get('film_h')
@@ -670,7 +686,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
 
         # -------------------------------------------------------------- post-init
 
-        self.key_temp, self.key_specific_heats, self.key_enthalpy = calculate_interpolation_data(self.pcm_properties)
+        self.key_temp, self.key_specific_heats, self.key_enthalpy = calculate_interpolation_data(self.enthalpy_lut)
         # self.key_enthalpy *= (self.pcm_mass_kg * 1e3)
         
         
@@ -868,8 +884,8 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         # PCM segment calculations (updated with adjustable thickness)
         pcm_density = self.pcm_properties["solid"]["pcm_density"] * 1e3 # convert to kg/m³
         cp_pcm = np.interp(start_T,
-                           self.pcm_properties["enthalpy_lut"][:,0],
-                           self.pcm_properties["enthalpy_lut"][:,1])
+                           self.enthalpy_lut[:,0],
+                           self.enthalpy_lut[:,1])
 
         # initialize PCM mass dictionary
         self.pcm_mass_dict = {}
@@ -1247,11 +1263,11 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
 
         # ---------- geometry ----------
         r = float(self.tank_radius_m)
-        H = float(getattr(self, "tank_height_m", 2.0 * r))
+        L = float(getattr(self, "tank_height_m", 2.0 * r))
         
         # Characteristic length of each node
-        H_node = H / self.n_nodes
-        if H <= 0.0 or r <= 0.0:
+        L_node = L / self.n_nodes
+        if L <= 0.0 or r <= 0.0:
             raise ValueError("tank_height_m and tank_radius_m must be > 0")
         A_cs = np.pi * r * r
 
@@ -1305,11 +1321,12 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
             u_scale = np.clip(u_scale, 0.0, 5.0)
 
         U_wall_node = gamma_w * U_mean * u_scale
-        Re_H_node = U_wall_node * H_node / max(nu_f, 1e-12)
+        Re_L_node = U_wall_node * L_node / max(nu_f, 1e-12)
 
+        # top and bottom walls ignored
         # ---------- natural convection (vertical wall) PER NODE ----------
         C_lam = 0.671 / (1.0 + (0.492 / max(Pr_f, 1e-12))**0.5625)**0.444
-        Ra_side = g * beta_z * np.abs(dT) * (H_node**3) / (max(nu_f, 1e-12)**2) * Pr_f
+        Ra_side = g * beta_z * np.abs(dT) * (L_node**3) / (max(nu_f, 1e-12)**2) * Pr_f
         Ra_quarter = np.maximum(Ra_side, 1e-30)**0.25
         Nu_nat = 2.0 / np.log(np.maximum(1.0 + 2.0 / np.maximum(C_lam * Ra_quarter, 1.0e-30), 1.0 + 1.0e-12))
         Nu_nat = np.maximum(Nu_nat, 1.0)  # conduction floor
@@ -1317,9 +1334,9 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         # ---------- forced convection (vertical plate) PER NODE ----------
         Pr13 = Pr_f**(1.0/3.0)
         Nu_forced = np.where(
-            Re_H_node < 5.0e5,
-            0.664 * np.sqrt(np.maximum(Re_H_node, 0.0)) * Pr13,
-            np.maximum(0.037 * (np.maximum(Re_H_node, 0.0)**0.8) * Pr13 - 871.0 * Pr13, 0.0),
+            Re_L_node < 5.0e5,
+            0.664 * np.sqrt(np.maximum(Re_L_node, 0.0)) * Pr13,
+            np.maximum(0.037 * (np.maximum(Re_L_node, 0.0)**0.8) * Pr13 - 871.0 * Pr13, 0.0),
         )
         if Q_draw_m3s <= 0.0:
             Nu_forced[:] = 0.0
@@ -1329,7 +1346,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         Nu_tot = (Nu_forced**n_blend + Nu_nat**n_blend)**(1.0/n_blend)
 
         # ---------- h per node ----------
-        h_z = Nu_tot * k_f / H
+        h_z = Nu_tot * k_f / L_node
 
         # if hasattr(self, "water_side_film_h") and self.water_side_film_h is not None:
         #     href = float(self.water_side_film_h)
@@ -1433,6 +1450,11 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         # Note: most results are included in Dwelling/WH. Only inputs and states are saved to self.results
         results = super().generate_results()
 
+        if self.verbosity >= 3:
+            results['Total Water Heater PCM Enthalpy (J)'] = self.enthalpy_pcm.sum()
+            results['Delta Water Heater PCM Enthalpy (J)'] = self.delta_enthalpy_pcm.sum()
+            results['Total Water Heater PCM Heat Injected (W)'] = self.pcm_heat_to_water_rc_network.sum()
+            
         if self.verbosity >= 6:
             # water nodes
             for i, idx in enumerate(self.t_wh_idx):
@@ -1445,9 +1467,6 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
                 results[f"Water Tank {self.state_names[idx]} Heat Injected (W)"] = self.pcm_heat_to_water_rc_network[i]
                 results[f"Water Tank {self.state_names[idx]} Capacitance (J/K)"] = self.capacitances[idx]
                 
-            results['Total PCM Enthalpy (J)'] = self.enthalpy_pcm.sum()
-            results['Delta Total PCM Enthalpy (J)'] = self.delta_enthalpy_pcm.sum()
-            results['Total PCM Heat Injected (W)'] = self.pcm_heat_to_water_rc_network.sum()
             results['PCM Mass (kg)'] = self.pcm_mass_kg
             for key,value in self.tank_ua_values.items():
                 results[key] = value

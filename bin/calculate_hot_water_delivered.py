@@ -35,7 +35,7 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
         is_pcm                   = False
 
         # time deltas (s)
-        df_copy.index = pd.to_datetime(df_copy['Time'])
+        df_copy.index = pd.to_datetime(df_copy['Time'], errors='coerce', format='mixed')
         df_copy['time_delta'] = (
             pd.to_datetime(df_copy.index).to_series().diff().dt.total_seconds().fillna(0.0)
         )

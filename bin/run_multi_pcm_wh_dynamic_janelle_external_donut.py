@@ -62,9 +62,9 @@ DEFAULT_PCM_PROPERTIES = {
 
 num_points = 10
 
-sa_ratios = [30]
+sa_ratios = [4]
 # sa_ratios = [5, 10, 15, 20, 25, 30]
-h_values = [5000]
+h_values = [1000]
 # h_values = np.logspace(np.log10(50), np.log10(5000), num_points)
 
 

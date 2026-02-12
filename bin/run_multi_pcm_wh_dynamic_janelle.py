@@ -32,33 +32,23 @@ GAL_TO_L = 3.78541
 
 start_node = 4
 end_node = 9
+
 DEFAULT_PCM_PROPERTIES = {
-    "t_m1": 50,  # C
-    "t_m2": 55,  # C
-    "h_fus": 226,  # J/g
     "h": 600,  # W/m^2K
-    "sa_ratio": 15,  # m^2/m^3 of total pcm volume
-    "h_conv": 100,  # W/K, accounts for surface area (ha)
-    "setpoint_temp": 50,  # C
+    "sa_ratio": 15, # m^2/m^3 of total pcm heat exchanger volume
+    "h_conv": 100,  # W/m^2-K, accounts for surface area (ha)
     "solid": {
-        "pcm_density": 0.904,  # g/cm**3
-        "pcm_cp": 1.20,  # J/g-C # adjusted by real measurements average from 0-45c
-        "pcm_conductivity": 0.28,  # W/m-C, not used
-        # "pcm_c": 1717.6,  # J/m**3-C, not used
+        "pcm_density": 0.904,  # g/cm^3
+        "pcm_cp": 0.6,  # J/g-C # adjusted by real measurements average from 0-45c
+        "pcm_conductivity":0.2,  # W/m-C
     },
-    "liquid": {
-        "pcm_density": 0.829,  # g/cm**3
-        "pcm_cp": 1.33,  # J/g-C # adjusted by real measurements average from 55-100c
-        "pcm_conductivity": 0.16,  # W/m-C, not used
-        # "pcm_c": 1823.8,  # J/m**3-C, not used
-    },
-    "enthalpy_lut": "60-40_PCM55-TPU_cp-h-T_data_shifted_120F.csv",
+    "enthalpy_lut_file": "cp_h-T_data_shifted_120F.csv",
 }
 
-num_points = 20
+num_points = 10
 
-sa_ratios = [4]
-# h_values = [5000]
+sa_ratios = [6]
+h_values = [5000]
 # 700 — 2200 in^2 for the MEPCM 66% vol fraction fill
 # sa_ratios = [0.673573, 0.817910, 0.962247, 1.106584, 1.250921, 1.395258, 1.539595, 1.683932, 1.828269, 1.972606, 2.116943]
 # 200-2000 in^2 for the backfilled 74% vol fraction fill
@@ -79,13 +69,14 @@ sa_ratios = [4]
 # sa_ratios = np.linspace(2, 30, num_points)
 
 # case 2
-# sa_ratios = np.linspace(1, 16, num_points)
+sa_ratios = np.linspace(1, 16, num_points)
 
 # case 3
 # sa_ratios = np.linspace(1, 50, num_points)
 
 # h_values = np.linspace(np.log10(50), np.log10(5000), num_points)
 h_values = np.linspace(50, 5000, num_points)
+# h_values = [500]
 # h_values = np.linspace(50, 5000, 20)
 
 # pcm_file_names = [f"cp_h-T_data_shifted_{i}F.csv" for i in range(110, 142, 2)]
@@ -98,13 +89,15 @@ simulation_duration_days = 220
 
 # pcm_file_names = ['ct53_h-T_data_66frac.csv']
 # pcm_file_names = ['ct53_h-T_data_64frac.csv']
-# pcm_file_names = ['ct53_h-T_data_58frac.csv']
+# pcm_file_names = ['ct53_h-T_data_58frac.csv']W
 # pcm_file_names = ['ct53_h-T_data_57frac.csv']
 
 # pcm_file_names = ['ct53-resin_h-T_data_88frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_85frac.csv']
-pcm_file_names = ['ct53-resin_h-T_data_83frac.csv']
-# pcm_file_names = ['ct53-resin_h-T_data_81frac.csv']
+# pcm_file_names = ['ct53-resin_h-T_data_83frac.csv']
+# pcm_file_names = [f'100%_ct53-resin_h-T_data_88frac_{x}F.csv' for x in range (110, 142 + 1, 1)]
+# pcm_file_names = [f'100%_ct53-resin_h-T_data_88frac_{x}F.csv' for x in range (110, 142 + 1, 1)]
+pcm_file_names = ['ct53-resin_h-T_data_81frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_77frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_55frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_45frac.csv']
@@ -115,7 +108,7 @@ setpoint_temps_c = [
     (setpoint_temp - 32) * (5 / 9) for setpoint_temp in setpoint_temps_f
 ]
 
-case_value = "Case7-1"
+case_run_name = "case01"
 
 # tank_volume_gal = [40,50, 65]
 tank_volume_gal = [40]
@@ -127,7 +120,7 @@ tank_volume_gal = [40]
 # vol_fracs = [0.66]
 # vol_fracs = [0.74]
 # vol_fracs = [0.26]
-vol_fracs = [0.62]
+vol_fracs = [0.74]
 
 # pcm_vol_fractions = [{i: vol_fract for i in range(1, n + 1)} for n in range(1, num_nodes + 1)]
 # pcm_vol_fractions = [
@@ -259,6 +252,16 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
     setpoint_temp = convert(setpoint_temp_f, 'degF', 'degC')
     hot_water_temp = convert(hot_water_temp_f, 'degF', 'degC')
     
+    def pcm_label():
+        model = getattr(wh, "model", None)
+        pcm_props = getattr(model, "pcm_properties", None)
+        if isinstance(pcm_props, dict):
+            try:
+                return f"sa_ratio: {pcm_props['sa_ratio']:.2f}, ha: {pcm_props['h_conv']:.2f}"
+            except Exception:
+                return "pcm=unknown"
+        return "Default no PCM"
+
     for t_idx, t in enumerate(times):
         control_signal = {}
 
@@ -282,7 +285,7 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
                     }
                     if disable_heating_during_draw:
                         control_signal['Water Heating Setpoint (C)'] = 5
-                    print(f"[{t}] → FIRST-HOUR test STARTED, drawing {draw_rate_gpm} gpm")
+                    print(f"[{t}] ({pcm_label()})  → FIRST-HOUR test STARTED, drawing {draw_rate_gpm} gpm")
 
             elif test_active:
                 test_timer -= delta_min
@@ -290,7 +293,7 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
                 if wh.mode == 'Off' and not draw_active:
                     draw_active = True
                     # control_signal will be set in accumulation step if draw_active remains true
-                    print(f"[{t}] → MODE=Off, RESTARTING draw")
+                    print(f"[{t}] ({pcm_label()}) → MODE=Off, RESTARTING draw")
 
                 # Check if we've reached the test duration and should trigger final draw
                 if test_timer <= 0 and not final_draw_triggered:
@@ -298,19 +301,19 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
                     # If not already drawing, start the draw
                     if not draw_active:
                         draw_active = True
-                        print(f"[{t}] → FINAL DRAW: Timer elapsed ({test_timer:.2f}), initiating final draw")
+                        print(f"[{t}] ({pcm_label()}) → FINAL DRAW: Timer elapsed ({test_timer:.2f}), initiating final draw")
                     else:
-                        print(f"[{t}] → FINAL DRAW: Timer elapsed ({test_timer:.2f}), draw already active, continuing")
+                        print(f"[{t}] ({pcm_label()}) → FINAL DRAW: Timer elapsed ({test_timer:.2f}), draw already active, continuing")
                 
                 if draw_active and wh.model.outlet_temp < hot_water_temp:
                     draw_active = False
                     control_signal = {} # Explicitly stop draw signal for this step
-                    print(f"[{t}] → temp fell ({wh.model.outlet_temp:.1f}C vs {hot_water_temp:.1f}C limit), STOPPING draw")
+                    print(f"[{t}] ({pcm_label()}) → temp fell ({wh.model.outlet_temp:.1f}C vs {hot_water_temp:.1f}C limit), STOPPING draw")
 
                 if (allow_setpoint_start and not draw_active and wh.model.outlet_temp >= setpoint_temp):
                     draw_active = True
                     # control_signal will be set in accumulation step
-                    print(f"[{t}] → reached setpoint ({wh.model.outlet_temp:.1f}C), STARTING draw")
+                    print(f"[{t}] ({pcm_label()}) → reached setpoint ({wh.model.outlet_temp:.1f}C), STARTING draw")
 
                 if draw_active:
                     control_signal['Water Heating (L/min)'] = draw_rate_gpm * GAL_TO_L
@@ -323,7 +326,7 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
                 if test_timer <= 0 and final_draw_triggered and not draw_active:
                     test_active = False
                     test_completed = True
-                    print(f"[{t}] → TEST COMPLETE: delivered {total_gallons_delivered:.2f} gallons")
+                    print(f"[{t}] ({pcm_label()}) → TEST COMPLETE: delivered {total_gallons_delivered:.2f} gallons")
                     # We don't break immediately to ensure the final state is properly updated
                     # Instead, we'll break at the end of this iteration
         
@@ -993,20 +996,21 @@ if __name__ == "__main__":
                                 # print(
                                 #     f"{YELLOW}Submitted {model_name} simulation to queue{RESET}"
                                 # )
+                                
                                 # heat pump water heater
-                                 # Create fresh copy of default args for each simulation
+                                # Create fresh copy of default args for each simulation
                                 current_default_args = copy.deepcopy(default_args_default)
                                 current_default_args['is_heatpump'] = True
                                 current_pcm_properties = copy.deepcopy(DEFAULT_PCM_PROPERTIES)
                                 current_pcm_properties['setpoint_temp'] = setpoint_temp_c
                                 current_pcm_properties["sa_ratio"] = sa_ratio
                                 current_pcm_properties["h"] = h_value
-                                current_pcm_properties['enthalpy_lut'] = pcm_file_name
+                                current_pcm_properties['enthalpy_lut_file'] = pcm_file_name
 
                                 # Add PCM model with specific volume fraction
                                 model_name = convert_dict_to_name(pcm_vol_fraction)
 
-                                model_name = f"{case_value}_{model_name}_Heatpump_SA-{sa_ratio:.2f}_H-{h_value:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
+                                model_name = f"{case_run_name}_{model_name}_Heatpump_SA-{sa_ratio:.2f}_H-{h_value:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
                                 i += 1
                                 current_default_args = add_pcm_model(
                                     current_default_args,

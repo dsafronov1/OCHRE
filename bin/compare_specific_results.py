@@ -1091,11 +1091,6 @@ def get_column_index(col):
     return 0  # Fallback if no number is found
 
 
-import re
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-
 # Assumes these helpers/constants are defined elsewhere:
 #   - find_matching_columns(df, patterns)
 #   - get_column_index(column_name)
@@ -2262,12 +2257,19 @@ def calculate_single_uef(df, name):
     import pandas as pd
     import numpy as np
 
+    def _parse_time(series: pd.Series) -> pd.Series:
+        # Support mixed timestamp formats (with/without fractional seconds).
+        return pd.to_datetime(series, errors="coerce", format="mixed")
+
     def _compute_uef_for_df(local_df: pd.DataFrame) -> float:
         if local_df.empty:
             return np.nan
 
         local = local_df.copy()
-        local['Time'] = pd.to_datetime(local['Time'])
+        local['Time'] = _parse_time(local['Time'])
+        local = local.dropna(subset=['Time'])
+        if local.empty:
+            return np.nan
         local = local.sort_values('Time')
         local['dt_s'] = local['Time'].diff().dt.total_seconds().fillna(0)
 
@@ -2306,7 +2308,8 @@ def calculate_single_uef(df, name):
 
     # ---- Whole-dataset UEF ----
     df_all = df.copy()
-    df_all['Time'] = pd.to_datetime(df_all['Time'])
+    df_all['Time'] = _parse_time(df_all['Time'])
+    df_all = df_all.dropna(subset=['Time'])
     df_all = df_all.sort_values('Time')
     uef_all = _compute_uef_for_df(df_all)
 
@@ -2684,6 +2687,153 @@ def create_heat_exchanger_plots(dfs):
     fig.update_xaxes(title_text="Time", row=3, col=1)
     
     return fig
+
+def plot_pcm_reference_and_deciles_plotly_F(
+    pcms,
+    pcms_names,
+    ref_f=127,
+    x_min_f=85,
+    x_max_f=155,
+    show=True,
+):
+    if len(pcms) != len(pcms_names):
+        raise ValueError("pcms and pcms_names must have the same length")
+
+    # ----------------------------
+    # Locate reference PCM
+    # ----------------------------
+    ref_matches = [i for i, n in enumerate(pcms_names) if str(ref_f) in str(n)]
+    if len(ref_matches) != 1:
+        raise ValueError(f"Expected exactly one PCM containing '{ref_f}', found {ref_matches}")
+    ref_idx = ref_matches[0]
+
+    # ----------------------------
+    # Helpers
+    # ----------------------------
+    def K_to_F(Tk):
+        return (Tk - 273.15) * 9.0 / 5.0 + 32.0
+
+    def prepare(arr):
+        a = np.asarray(arr)[:, :3]
+        a = a[np.isfinite(a).all(axis=1)]
+        a = a[np.argsort(a[:, 0])]
+        return (
+            K_to_F(a[:, 0]),
+            a[:, 1] / 1.8,  # Cp -> J/g-F
+            a[:, 2],        # enthalpy
+        )
+
+    def decile_indices(n):
+        step = max(1, int(round(n / 10)))
+        idx = np.arange(0, n, step)
+        if idx[-1] != n - 1:
+            idx = np.append(idx, n - 1)
+        return np.unique(idx)
+
+    dec_idx = [i for i in decile_indices(len(pcms)) if i != ref_idx]
+
+    # ----------------------------
+    # Common layout (VALID ONLY)
+    # ----------------------------
+    common_layout = dict(
+        template="plotly_white",
+        font=dict(size=20),
+        margin=dict(l=90, r=40, t=90, b=80),
+        legend=dict(font=dict(size=16)),
+        xaxis=dict(
+            range=[x_min_f, x_max_f],
+            title=dict(text="Temperature (°F)", font=dict(size=22)),
+            tickfont=dict(size=18),
+        ),
+    )
+
+    # ----------------------------
+    # Enthalpy figure
+    # ----------------------------
+    fig_h = go.Figure()
+    fig_h.update_layout(
+        **common_layout,
+        title=dict(
+            text=f"PCM Enthalpy vs Temperature (Reference {ref_f}F)",
+            font=dict(size=28),
+        ),
+        yaxis=dict(
+            title=dict(text="Enthalpy (J/g)", font=dict(size=22)),
+            tickfont=dict(size=18),
+        ),
+    )
+
+    # ----------------------------
+    # Cp figure
+    # ----------------------------
+    fig_cp = go.Figure()
+    fig_cp.update_layout(
+        **common_layout,
+        title=dict(
+            text=f"PCM Heat Capacity vs Temperature (Reference {ref_f}F)",
+            font=dict(size=28),
+        ),
+        yaxis=dict(
+            title=dict(text="Cp (J/g-°F)", font=dict(size=22)),
+            tickfont=dict(size=18),
+        ),
+    )
+
+    # ----------------------------
+    # Plot reference (black)
+    # ----------------------------
+    T_F, cp_F, h = prepare(pcms[ref_idx])
+
+    fig_h.add_trace(go.Scatter(
+        x=T_F,
+        y=h,
+        mode="lines",
+        name=f"{pcms_names[ref_idx]} (reference)",
+        line=dict(color="black", width=6),
+    ))
+
+    fig_cp.add_trace(go.Scatter(
+        x=T_F,
+        y=cp_F,
+        mode="lines",
+        name=f"{pcms_names[ref_idx]} (reference)",
+        line=dict(color="black", width=6),
+    ))
+
+    # ----------------------------
+    # Plot decile curves
+    # ----------------------------
+    palette = pc.qualitative.Dark24
+
+    for k, i in enumerate(dec_idx):
+        T_F, cp_F, h = prepare(pcms[i])
+        color = palette[k % len(palette)]
+
+        fig_h.add_trace(go.Scatter(
+            x=T_F,
+            y=h,
+            mode="lines",
+            name=pcms_names[i],
+            line=dict(color=color, width=3),
+            opacity=0.55,
+        ))
+
+        fig_cp.add_trace(go.Scatter(
+            x=T_F,
+            y=cp_F,
+            mode="lines",
+            name=pcms_names[i],
+            line=dict(color=color, width=3),
+            opacity=0.55,
+        ))
+
+    if show:
+        fig_h.show()
+        fig_cp.show()
+
+    return fig_h, fig_cp, ref_idx, dec_idx
+
+
 
 def save_plots(figures, metadata, output_folder='plots'):
     """
@@ -3616,6 +3766,8 @@ if __name__ == "__main__":
     # parallel_display_plots(all_plots, stagger_delay=0.1)  # 0.1 second delay between plots
     # print(f"Temp chart display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
+    
+    
     # _plot_time = time.perf_counter()
     # film_temp_charts, film_temp_metadata = create_deltaT_over_film_coeff_plots(dfs)
     # print(f"Film coeff plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
@@ -3623,6 +3775,8 @@ if __name__ == "__main__":
     # _plot_time = time.perf_counter()
     # parallel_display_plots(film_temp_charts, stagger_delay=0.1)  # 0.1 second delay between plots
     # print(f"Film coeff plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    
+    
     
     # _plot_time = time.perf_counter()
     # film_htc_charts, film_htc_metadata = create_film_htc_plots(dfs)
@@ -3633,6 +3787,8 @@ if __name__ == "__main__":
     # print(f"Film HTC plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
     
+    
+    
     # _plot_time = time.perf_counter()
     # film_htc_charts, film_htc_metadata = create_deltaT_vs_film_coeff_scatter(dfs)
     # print(f"Film HTC plots pool time: {time.perf_counter() - _plot_time:.2f} seconds")
@@ -3640,6 +3796,8 @@ if __name__ == "__main__":
     # _plot_time = time.perf_counter()
     # parallel_display_plots(film_htc_charts, stagger_delay=0.1)  # 0.1 second delay between plots
     # print(f"Film HTC plots display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    
+    
     
     # _plot_time = time.perf_counter()
     # dt_charts, dt_metadata = create_deltaT_over_time_plots(dfs)
@@ -3651,6 +3809,7 @@ if __name__ == "__main__":
     
     
     
+    
     # _plot_time = time.perf_counter()
     # all_plots = parallel_create_energy_output_plots(dfs, uef_values=uef_last_day, patterns=['T_WH', 'T_PCM'])
     # print(f"Energy output processing pool time: {time.perf_counter() - _plot_time:.2f} seconds")
@@ -3658,6 +3817,8 @@ if __name__ == "__main__":
     # _plot_time = time.perf_counter()
     # parallel_display_plots(all_plots, stagger_delay=0.1)  # 0.1 second delay between plots
     # print(f"Energy output display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+
+
 
     # Create water flow and temperature plots
     # _pool_time = time.perf_counter()
@@ -3676,7 +3837,7 @@ if __name__ == "__main__":
     # print(f"Hot water plot time: {time.perf_counter() - _hot_water_plot_time:.2f} seconds")
     
     # csv_path = export_draw_outputs_csv(output, "../OCHRE_results/results_csv/results_no_FHR_ADJUSTMENT.csv")
-    csv_path = export_draw_outputs_csv(output, "../OCHRE_results/results_csv/results_FHR_ADJUSTMENT.csv")
+    csv_path = export_draw_outputs_csv(output, "../OCHRE_results/results_csv/results_FHR_ADJUSTMENT_PCM_PARMETRIC_LOW_CONDUCTIVITY.csv")
     
     # plot_draw_events(output)
     # plot_totals(output)
@@ -3685,13 +3846,15 @@ if __name__ == "__main__":
     # plot_comparison(dfs, output)
     
     pcms = []
-    pcms = [np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", f"90%_cp_h-T_data_shifted_{i}F.csv"), delimiter=",", skiprows=1) for i in range(110, 142, 1)]
+    pcms = [np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", f"100%_ct53-resin_h-T_data_88frac_{i}F.csv"), delimiter=",", skiprows=1) for i in range(110, 142 + 1, 1)]
     # pcms = [np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", "cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1)]
-    pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", "90-cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
+    # pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", "90-cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
     # pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", "60-40_PCM55-TPU_cp-h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
     
-    pcms_names = [f'90% Infiltrated Graphite PCM {i}F' for i in range(110, 142, 1)]
+    pcms_names = [f'PCM {i}F' for i in range(110, 142 + 1, 1)]
     # pcms_names = ['90% Graphite infiltrated PCM'] 
+    
+    _ = plot_pcm_reference_and_deciles_plotly_F(pcms, pcms_names)
     
     # fig, integral = pcm_enthalpy_integral_bar(pcms, pcms_names)
     # fig.show()

@@ -6,6 +6,7 @@ from plotly.subplots import make_subplots
 from scipy.interpolate import griddata
 from pathlib import Path
 import re
+import pickle
 import time
 import numpy as np
 import concurrent.futures
@@ -781,7 +782,7 @@ def plot_2d_comparison_generic(dfs, draw_outputs, x_column_pattern, y_column_pat
             logger.error(f"Exception plotting {z_col}: {e}\n{traceback.format_exc()}")
             return None
 
-    name = "Case 7 77% Resin PCM 61% Loading"
+    name = "PCM Temp Parametric 88% Resin PCM 74% Loading"
     
     title_total = (
         f"{name} First-Hour Rating:<br>{y_column_pattern} vs SA/V Ratio "
@@ -1917,6 +1918,23 @@ def process_single_folder(output_folder, folder):
     # plot_draw_event_summary(output)
     # plot_draw_events(output)
     plot_2d_comparison_generic(dfs, outputs, "sa_ratio", "h (W/m^2K)", setpoint, pcm_temp, tank_type, tank_size)
+    
+    # output and save to disk the variables dfs and outputs to load into different notebooks
+     
+    dfs_file = 'dfs.pickle'
+    outputs_file = 'outputs.pickle'
+    
+    # drop all but the first row of the dataframes 
+    
+    dfs_new = dfs.copy()
+    for key in dfs.keys():
+        dfs_new[key] = dfs[key].iloc[0:1]
+        
+    with open(dfs_file, 'wb') as f:
+        pickle.dump(dfs_new, f)
+    
+    with open(outputs_file, 'wb') as f:
+        pickle.dump(outputs, f) 
     
     print(f"✅ Finished processing setpoint={setpoint}F with pcm_temp={pcm_temp}F for tank type {tank_type} at {tank_size}gal in {output_folder}")
     

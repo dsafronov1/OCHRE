@@ -32,8 +32,6 @@ class WaterHeater(Equipment):
                 model_class = OneNodeWaterModel
             elif nodes == 2:
                 model_class = TwoNodeWaterModel
-            # elif kwargs.get('Equipment', {}).get('Water Heating', {}).get('model_class') == TankWithMultiPCM:
-            #     model_class = TankWithMultiPCM
             else:
                 model_class = StratifiedWaterModel
 
