@@ -12,6 +12,6 @@ dist/
 docs/_build
 *.egg-info/
 *.code-workspace
-environment.yml
 
 ochre/defaults/Input Files/OCHRE*
+.history

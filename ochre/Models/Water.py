@@ -35,13 +35,14 @@ class StratifiedWaterModel(RCModel):
       - The heat delivered to the load (relative to mains temperature)
       - The heat lost to ambient air
     """
-    name = 'Water Tank'
+
+    name = "Water Tank"
     optional_inputs = [
-        'Water Heating (L/min)',
-        'Clothes Washer (L/min)',
-        'Dishwasher (L/min)',
-        'Mains Temperature (C)',
-        'Zone Temperature (C)',
+        "Water Heating (L/min)",
+        "Clothes Washer (L/min)",
+        "Dishwasher (L/min)",
+        "Mains Temperature (C)",
+        "Zone Temperature (C)",
     ]
 
     def __init__(self, water_nodes=12, water_vol_fractions=None, **kwargs):
@@ -52,15 +53,17 @@ class StratifiedWaterModel(RCModel):
             self.n_nodes = len(water_vol_fractions)
             self.vol_fractions = np.array(water_vol_fractions) / sum(water_vol_fractions)
 
-        self.volume = kwargs['Tank Volume (L)']  # water volume, in L
+        self.volume = kwargs["Tank Volume (L)"]  # in L
 
-        super().__init__(external_nodes=['AMB'], **kwargs)
+        capacitances, resistances = self.load_rc_data(**kwargs)
+
+        super().__init__(capacitances, resistances, external_nodes=["AMB"], **kwargs)
         self.next_states = self.states  # for holding state info for next time step
 
-        self.t_amb_idx = self.input_names.index('T_AMB')
+        self.t_amb_idx = self.input_names.index("T_AMB")
         assert self.t_amb_idx == 0  # should always be first
-        self.t_1_idx = self.state_names.index('T_WH1')
-        self.h_1_idx = self.input_names.index('H_WH1')
+        self.t_1_idx = self.state_names.index("T_WH1")
+        self.h_1_idx = self.input_names.index("H_WH1")
 
         # key variables for results
         self.draw_total = 0  # in L
@@ -73,25 +76,27 @@ class StratifiedWaterModel(RCModel):
         self.outlet_temp = 0  # temperature of outlet water, in C
 
         # mixed temperature (i.e. target temperature) setpoint for fixtures - Sink/Shower/Bath (SSB)
-        self.tempered_draw_temp = kwargs.get('Mixed Delivery Temperature (C)', convert(125, 'degF', 'degC'))
+        self.tempered_draw_temp = kwargs.get("Mixed Delivery Temperature (C)", convert(105, "degF", "degC"))
+        self.hot_draw_temp = kwargs.get("Tempering Valve Setpoint (C)", convert(125, "degF", "degC"))
+        self.setpoint_temp = kwargs.get("Setpoint Temperature (C)", convert(125, "degF", "degC"))
         # Removing target temperature for clothes washers
         # self.washer_draw_temp = kwargs.get('Clothes Washer Delivery Temperature (C)', convert(125, 'degF', 'degC'))
 
     def load_rc_data(self, **kwargs):
         # Get properties from input file
-        h = kwargs['Tank Height (m)']  # in m
+        h = kwargs["Tank Height (m)"]  # in m
         top_area = self.volume / h / 1000  # in m^2
         r = (top_area / np.pi) ** 0.5
 
-        if 'Heat Transfer Coefficient (W/m^2/K)' in kwargs:
-            u = kwargs['Heat Transfer Coefficient (W/m^2/K)']
-        elif 'UA (W/K)' in kwargs:
-            ua = kwargs['UA (W/K)']
+        if "Heat Transfer Coefficient (W/m^2/K)" in kwargs:
+            u = kwargs["Heat Transfer Coefficient (W/m^2/K)"]
+        elif "UA (W/K)" in kwargs:
+            ua = kwargs["UA (W/K)"]
             total_area = 2 * top_area + 2 * np.pi * r * h
             u = ua / total_area
         else:
-            raise ModelException('Missing heat transfer coefficient (UA) for {}'.format(self.name))
-#
+            raise ModelException("Missing heat transfer coefficient (UA) for {}".format(self.name))
+
         # calculate general RC parameters for whole tank
         c_water_tot = self.volume * water_c  # Heat capacity of water (J/K)
         r_int = (h / self.n_nodes) / water_conductivity / top_area  # R between nodes (K/W)
@@ -99,27 +104,25 @@ class StratifiedWaterModel(RCModel):
         r_top = 1 / u / top_area  # R from top/bottom of tank (K/W)
 
         # Capacitance per node
-        rc_params = {'C_WH' + str(i + 1): c_water_tot * frac for i, frac in enumerate(self.vol_fractions)}
+        capacitances = {f"WH{i + 1}": c_water_tot * frac for i, frac in enumerate(self.vol_fractions)}
 
         # Resistance to exterior from side, top, and bottom
-        rc_params.update({'R_WH{}_AMB'.format(i + 1): r_side_tot / frac for i, frac in enumerate(self.vol_fractions)})
-        rc_params['R_WH1_AMB'] = self.par(rc_params['R_WH1_AMB'], r_top)
-        rc_params['R_WH{}_AMB'.format(self.n_nodes)] = self.par(rc_params['R_WH{}_AMB'.format(self.n_nodes)], r_top)
+        resistances = {(f"WH{i + 1}", "AMB"): r_side_tot / frac for i, frac in enumerate(self.vol_fractions)}
+        resistances[("WH1", "AMB")] = self.par(resistances[("WH1", "AMB")], r_top)
+        resistances[(f"WH{self.n_nodes}", "AMB")] = self.par(resistances[(f"WH{self.n_nodes}", "AMB")], r_top)
 
         # Resistance between nodes
         if self.n_nodes > 1:
-            rc_params.update({'R_WH{}_WH{}'.format(i + 1, i + 2): r_int for i in range(self.n_nodes - 1)})
-            # rc_params.update({'R_WH{}_WH{}'.format(i + 1, i + 2): 1e-6 for i in range(self.n_nodes - 1)})
-            # todo update conductivity to 0 and 200k for testing
+            resistances.update({(f"WH{i + 1}", f"WH{i + 2}"): r_int for i in range(self.n_nodes - 1)})
 
-        return rc_params
-#
+        return capacitances, resistances
+
     @staticmethod
     def initialize_state(state_names, input_names, A_c, B_c, **kwargs):
-        t_init = kwargs.get('Initial Temperature (C)')
+        t_init = kwargs.get("Initial Temperature (C)")
         if t_init is None:
-            t_max = kwargs.get('Setpoint Temperature (C)', convert(125, 'degF', 'degC'))
-            t_db = kwargs.get('Deadband Temperature (C)', convert(10, 'degR', 'K'))
+            t_max = kwargs.get("Setpoint Temperature (C)", convert(125, "degF", "degC"))
+            t_db = kwargs.get("Deadband Temperature (C)", convert(10, "degR", "K"))
             # temp = t_max - np.random.rand(1) * t_db
 
             # set initial temperature close to top of deadband
@@ -129,14 +132,15 @@ class StratifiedWaterModel(RCModel):
         return {name: t_init for name in state_names}
 
     def update_water_draw(self):
-        heats_to_model = np.zeros(self.n_nodes)
-        self.mains_temp = self.current_schedule.get('Mains Temperature (C)')
+        heats_to_model = np.zeros(self.nx)
+        self.mains_temp = self.current_schedule.get("Mains Temperature (C)")
         self.outlet_temp = self.states[self.t_1_idx]  # initial outlet temp, for estimating draw volume
 
         # Note: removing target draw temperature for clothes washers, not implemented in ResStock
-        draw_tempered = self.current_schedule.get('Water Heating (L/min)', 0)
-        draw_hot = (self.current_schedule.get('Clothes Washer (L/min)', 0)
-                    + self.current_schedule.get('Dishwasher (L/min)', 0))
+        draw_tempered = self.current_schedule.get("Water Heating (L/min)", 0)
+        draw_hot = self.current_schedule.get("Clothes Washer (L/min)", 0) + self.current_schedule.get(
+            "Dishwasher (L/min)", 0
+        )
         # draw_cw = self.current_schedule.get('Clothes Washer (L/min)', 0)
         # draw_hot = self.current_schedule.get('Dishwasher (L/min)', 0)
         if not (draw_tempered + draw_hot):
@@ -148,11 +152,18 @@ class StratifiedWaterModel(RCModel):
             return heats_to_model
 
         if self.mains_temp is None:
-            raise ModelException('Mains temperature required when water draw exists')
+            raise ModelException("Mains temperature required when water draw exists")
 
         # calculate total draw volume from tempered draw volume(s)
         # for tempered draw, assume outlet temperature == T1, slightly off if the water draw is very large
-        self.draw_total = draw_hot
+        if self.tempered_draw_temp < self.setpoint_temp:
+            if self.outlet_temp <= self.hot_draw_temp:
+                self.draw_total = draw_hot
+            else:
+                vol_ratio_hot = (self.hot_draw_temp - self.mains_temp) / (self.outlet_temp - self.mains_temp)
+                self.draw_total = draw_hot * vol_ratio_hot
+        else:
+            self.draw_total = draw_hot
 
         if draw_tempered:
             self.draw_tempered = draw_tempered
@@ -179,8 +190,9 @@ class StratifiedWaterModel(RCModel):
             flow_fraction = 0.95  # Totally empirical factor based on detailed lab validation
             if draw_fraction > self.vol_fractions[0]:
                 # outlet temp is volume-weighted average of lower and upper temps
-                self.outlet_temp = (water_temps[0] * self.vol_fractions[0] +
-                                    water_temps[1] * (draw_fraction - self.vol_fractions[0])) / draw_fraction
+                self.outlet_temp = (
+                    self.states[0] * self.vol_fractions[0] + self.states[1] * (draw_fraction - self.vol_fractions[0])
+                ) / draw_fraction
             q_delivered = draw_liters * water_c * (self.outlet_temp - self.mains_temp)  # in J
 
             # q_to_mains_upper = self.state_capacitances[0] * (self.x[0] - self.mains_temp)
@@ -212,8 +224,9 @@ class StratifiedWaterModel(RCModel):
                 q_nodes = []
                 for i in range(self.n_nodes):
                     t_start = temps[i]
-                    vols_delivered = np.diff(vols_pre.clip(min=vols_post[i], max=vols_post[i + 1]),
-                                             prepend=vols_post[i])
+                    vols_delivered = np.diff(
+                        vols_pre.clip(min=vols_post[i], max=vols_post[i + 1]), prepend=vols_post[i]
+                    )
                     t_end = np.dot(temps, vols_delivered) / self.vol_fractions[i]
                     q_nodes.append((t_end - t_start) * self.capacitances[i])
                 q_nodes = np.array(q_nodes)
@@ -232,7 +245,7 @@ class StratifiedWaterModel(RCModel):
         super().update_inputs(schedule_inputs)
 
         # get zone temperature from schedule
-        t_zone = self.current_schedule['Zone Temperature (C)']
+        t_zone = self.current_schedule["Zone Temperature (C)"]
 
         # update heat injections from water draw
         # FUTURE: revise CW and DW when event based schedules are added
@@ -273,16 +286,17 @@ class StratifiedWaterModel(RCModel):
                     return
 
             elif new_temp < current_temp - 0.001:  # small computational errors are possible:
-                msg = 'Error in inversion mixing algorithm. ' \
-                      'New temperature ({}) less than previous ({}) at node {}.'
-                raise ModelException(msg.format(new_temp, water_temps[node_idx], node_idx + 1))
+                msg = "Error in inversion mixing algorithm. New temperature ({}) less than previous ({}) at node {}."
+                raise ModelException(msg.format(new_temp, self.next_states[node_idx], node_idx + 1))
 
         # check final heat to ensure no losses from mixing
         heat_check = np.dot(water_temps - init_states, self.capacitances[:self.n_nodes])  # in J
         if not abs(heat_check) < 1:
             raise ModelException(
-                'Large error ({}) in water heater inversion mixing algorithm.'
-                'Final state temperatures are: {}'.format(heat_check, water_temps))
+                "Large error ({}) in water heater inversion mixing algorithm.Final state temperatures are: {}".format(
+                    heat_check, self.next_states
+                )
+            )
 
     def update_model(self, control_signal=None):
         if control_signal is not None:
@@ -303,9 +317,8 @@ class StratifiedWaterModel(RCModel):
 
         # calculate heat loss, in W
         self.h_loss = self.h_injections - h_change - self.h_delivered
-        #if abs(self.h_loss) > 1000:
-         #   raise ModelException('Error in calculating heat loss for {} model'.format(self.name))
-         # commented this out due to it throwing an error when trying to use the UEF draw profile
+        if abs(self.h_loss) > 1000:
+            raise ModelException("Error in calculating heat loss for {} model".format(self.name))
 
         # If any temperatures are inverted, run inversion mixing algorithm
         # swap to 0.01 if self.high_res
@@ -318,11 +331,11 @@ class StratifiedWaterModel(RCModel):
 
         # check that states are within reasonable range
         # Note: default max temp on water heater model is 60C (140F). Temps may exceed that slightly
-        # if max(self.states) > 62 or min(self.states) < self.mains_temp - 10:
-        #     if max(self.states) > 65 or min(self.states) < self.mains_temp - 15:
-        #         raise ModelException(f'Water temperatures are outside acceptable range: {self.states}')
-        #     else:
-        #         self.warn(f'Water temperatures are outside acceptable range: {self.states}')
+        if max(self.states) > 62 or min(self.states) < self.mains_temp - 10:
+            if max(self.states) > 65 or min(self.states) < self.mains_temp - 15:
+                raise ModelException(f"Water temperatures are outside acceptable range: {self.states}")
+            else:
+                self.warn(f"Water temperatures are outside acceptable range: {self.states}")
 
         return current_results
 
@@ -331,20 +344,18 @@ class StratifiedWaterModel(RCModel):
         results = super().generate_results()
 
         if self.verbosity >= 3:
-            results['Hot Water Delivered (L/min)'] = self.draw_total
-            results['Hot Water Outlet Temperature (C)'] = self.outlet_temp
-            results['Hot Water Delivered (W)'] = self.h_delivered
-            results['Hot Water Unmet Demand (kW)'] = self.h_unmet_load / 1000
-        if self.verbosity >= 6:
-            water_states = self.states[: self.n_nodes]
-            if self.draw_tempered is not None:
-                results['Total Water Output (L/min)'] = self.draw_tempered
-            results['Hot Water Heat Injected (W)'] = self.h_injections
-            results['Hot Water Heat Loss (W)'] = self.h_loss
-            results["Hot Water Average Temperature (C)"] = water_states.dot(self.vol_fractions)
-            results["Hot Water Maximum Temperature (C)"] = water_states.max()
-            results["Hot Water Minimum Temperature (C)"] = water_states.min()
-            results['Hot Water Mains Temperature (C)'] = self.mains_temp
+            results["Hot Water Unmet Demand (kW)"] = self.h_unmet_load / 1000
+            results["Hot Water Outlet Temperature (C)"] = self.outlet_temp
+        if self.verbosity >= 4:
+            results["Hot Water Delivered (L/min)"] = self.draw_total
+            results["Hot Water Delivered (W)"] = self.h_delivered
+        if self.verbosity >= 7:
+            results["Hot Water Heat Injected (W)"] = self.h_injections
+            results["Hot Water Heat Loss (W)"] = self.h_loss
+            results["Hot Water Average Temperature (C)"] = self.states.dot(self.vol_fractions)
+            results["Hot Water Maximum Temperature (C)"] = self.states.max()
+            results["Hot Water Minimum Temperature (C)"] = self.states.min()
+            results["Hot Water Mains Temperature (C)"] = self.mains_temp
         return results
 
 
@@ -354,7 +365,7 @@ class OneNodeWaterModel(StratifiedWaterModel):
     """
 
     def __init__(self, **kwargs):
-        kwargs.pop('water_nodes', None)
+        kwargs.pop("water_nodes", None)
         super().__init__(water_nodes=1, **kwargs)
 
 
@@ -367,7 +378,7 @@ class TwoNodeWaterModel(StratifiedWaterModel):
     """
 
     def __init__(self, **kwargs):
-        kwargs.pop('water_nodes', None)
+        kwargs.pop("water_nodes", None)
         super().__init__(water_nodes=2, water_vol_fractions=[1 / 3, 2 / 3], **kwargs)
 
 
@@ -379,13 +390,12 @@ class IdealWaterModel(OneNodeWaterModel):
     def load_rc_data(self, **kwargs):
         # ignore RC parameters from the properties file
         self.volume = 1000
-        return {'R_WH1_AMB': 1e6,
-                'C_WH1': self.volume * water_c}
+        return {"WH1": self.volume * water_c}, {("WH1", "AMB"): 1e6}
 
     @staticmethod
     def initialize_state(state_names, input_names, A_c, B_c, **kwargs):
         # set temperature to upper threshold
-        t_max = kwargs.get('Setpoint Temperature (C)', convert(125, 'degF', 'degC'))
+        t_max = kwargs.get("Setpoint Temperature (C)", convert(125, "degF", "degC"))
 
         # Return states as a dictionary
         return {name: t_max for name in state_names}

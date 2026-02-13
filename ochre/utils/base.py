@@ -2,6 +2,7 @@ import os
 import re
 import json
 from _ctypes import PyObj_FromPtr
+import datetime as dt
 import pandas as pd
 import collections
 import xmltodict
@@ -47,12 +48,7 @@ def convert_hpxml_element(obj, use_sys_id):
             return {}
 
         first = list(obj.values())[0]
-        if (
-            len(obj) == 1
-            and isinstance(first, list)
-            and len(first) > 0
-            and isinstance(first[0], dict)
-        ):
+        if len(obj) == 1 and isinstance(first, list) and len(first) > 0 and isinstance(first[0], dict):
             if "SystemIdentifier" in first[0]:
                 # convert list into dict using 'SystemIdentifier'
                 new_obj = {d["SystemIdentifier"]["@id"]: d for d in first}
@@ -60,9 +56,7 @@ def convert_hpxml_element(obj, use_sys_id):
                 # keep list, remove name of length-1 dictionary key
                 new_obj = first
             return convert_hpxml_element(new_obj, use_sys_id)
-        elif (
-            use_sys_id and len(obj) == 1 and isinstance(first, dict) and "SystemIdentifier" in first
-        ):
+        elif use_sys_id and len(obj) == 1 and isinstance(first, dict) and "SystemIdentifier" in first:
             # rename dict key using 'SystemIdentifier'
             key = first["SystemIdentifier"]["@id"]
             return {key: convert_hpxml_element(first, use_sys_id)}
@@ -80,10 +74,7 @@ def convert_hpxml_element(obj, use_sys_id):
     elif isinstance(obj, list):
         if len(obj) > 0 and isinstance(obj[0], dict) and "SystemIdentifier" in obj[0]:
             # Convert list to dict with ids as keys
-            return {
-                item["SystemIdentifier"]["@id"]: convert_hpxml_element(item, use_sys_id)
-                for item in obj
-            }
+            return {item["SystemIdentifier"]["@id"]: convert_hpxml_element(item, use_sys_id) for item in obj}
         else:
             return [convert_hpxml_element(item, use_sys_id) for item in obj]
 
@@ -117,9 +108,7 @@ def import_hpxml(hpxml_file, use_sys_id=False, **house_args):
     assert version in ["4.0"]
 
     # Keep only building details
-    hpxml = convert_hpxml_element(
-        hpxml_original["HPXML"]["Building"]["BuildingDetails"], use_sys_id
-    )
+    hpxml = convert_hpxml_element(hpxml_original["HPXML"]["Building"]["BuildingDetails"], use_sys_id)
     hpxml = dict(hpxml)
 
     return hpxml
@@ -147,12 +136,7 @@ class MyEncoder(json.JSONEncoder):
         super(MyEncoder, self).__init__(**kwargs)
 
     def default(self, obj):
-        if isinstance(obj, NoIndent):
-            return self.FORMAT_SPEC.format(id(obj))
-        elif isinstance(obj, type):
-            return str(obj)
-        else:
-            return super(MyEncoder, self).default(obj)
+        return self.FORMAT_SPEC.format(id(obj)) if isinstance(obj, NoIndent) else super(MyEncoder, self).default(obj)
 
     def iterencode(self, obj, **kwargs):
         format_spec = self.FORMAT_SPEC  # Local var to expedite access.
@@ -172,22 +156,18 @@ class MyEncoder(json.JSONEncoder):
             yield encoded
 
 
-# Not used
-# def get_all_items(d):
-#     for key, value in d.items():
-#         yield key, value
-#         if isinstance(value, dict):
-#             yield from get_all_items(value)
-
-
 def save_json(data, file_name):
     # saves json file but writes long lists to a single line
     # see: https://stackoverflow.com/questions/42710879/write-two-dimensional-list-to-json-file
     def parse_object(obj):
+        if isinstance(obj, pd.DataFrame):
+            obj = obj.astype(str).to_dict("list") if obj.size < 100 else "<DataFrame>"
         if isinstance(obj, dict):
             return {key: parse_object(val) for key, val in obj.items()}
         elif isinstance(obj, (list, tuple)) and len(obj) > 4:
             return NoIndent(obj)
+        elif isinstance(obj, (dt.datetime, dt.timedelta, type)):
+            return str(obj)
         else:
             return obj
 
