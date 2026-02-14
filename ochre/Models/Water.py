@@ -233,7 +233,10 @@ class StratifiedWaterModel(RCModel):
 
         # convert heat transfer from J to W
         self.h_delivered = q_delivered / t_s
-        heats_to_model += q_nodes / t_s
+        if "pcm" in self.name.lower():
+            heats_to_model[:self.n_nodes] += q_nodes / t_s
+        else:
+            heats_to_model += q_nodes / t_s
 
         # calculate unmet loads, fixtures only, in W
         self.h_unmet_load = max(draw_tempered / 60 * water_c * (self.tempered_draw_temp - self.outlet_temp), 0)  # in W
@@ -351,8 +354,12 @@ class StratifiedWaterModel(RCModel):
             results["Hot Water Delivered (W)"] = self.h_delivered
         if self.verbosity >= 7:
             results["Hot Water Heat Injected (W)"] = self.h_injections
+            results["Total Water Output (L/min)"] = self.draw_tempered
             results["Hot Water Heat Loss (W)"] = self.h_loss
-            results["Hot Water Average Temperature (C)"] = self.states.dot(self.vol_fractions)
+            if "pcm" in self.name.lower():
+                results["Hot Water Average Temperature (C)"] = self.states[:self.n_nodes].dot(self.vol_fractions)
+            else:
+                results["Hot Water Average Temperature (C)"] = self.states.dot(self.vol_fractions)
             results["Hot Water Maximum Temperature (C)"] = self.states.max()
             results["Hot Water Minimum Temperature (C)"] = self.states.min()
             results["Hot Water Mains Temperature (C)"] = self.mains_temp

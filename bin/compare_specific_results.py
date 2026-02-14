@@ -3757,14 +3757,14 @@ if __name__ == "__main__":
     uef_last_day = [x['uef_last_day'] for x in uef_totals]
     print(f"UEF calculation time: {time.perf_counter() - _uef_time:.2f} seconds")
 
-    # _pool_time = time.perf_counter()
-    # all_plots = parallel_create_temperature_plots(dfs, uef_values=uef_last_day, patterns=['T_WH', 'T_PCM'])
-    # print(f"Temp chart processing pool time: {time.perf_counter() - _pool_time:.2f} seconds")
+    _pool_time = time.perf_counter()
+    all_plots = parallel_create_temperature_plots(dfs, uef_values=uef_last_day, patterns=['T_WH', 'T_PCM'])
+    print(f"Temp chart processing pool time: {time.perf_counter() - _pool_time:.2f} seconds")
     
-    # # # # # Display all plots
-    # _plot_time = time.perf_counter()
-    # parallel_display_plots(all_plots, stagger_delay=0.1)  # 0.1 second delay between plots
-    # print(f"Temp chart display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
+    # # # # Display all plots
+    _plot_time = time.perf_counter()
+    parallel_display_plots(all_plots, stagger_delay=0.1)  # 0.1 second delay between plots
+    print(f"Temp chart display pool time: {time.perf_counter() - _plot_time:.2f} seconds")
     
     
     
@@ -3846,15 +3846,15 @@ if __name__ == "__main__":
     # plot_comparison(dfs, output)
     
     pcms = []
-    pcms = [np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", f"100%_ct53-resin_h-T_data_88frac_{i}F.csv"), delimiter=",", skiprows=1) for i in range(110, 142 + 1, 1)]
+    # pcms = [np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", f"100%_ct53-resin_h-T_data_88frac_{i}F.csv"), delimiter=",", skiprows=1) for i in range(110, 142 + 1, 1)]
     # pcms = [np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", "cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1)]
     # pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", "90-cp_h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
     # pcms.append(np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "ochre", "defaults", "pcm_configs", "60-40_PCM55-TPU_cp-h-T_data_shifted_120F.csv"), delimiter=",", skiprows=1))
     
-    pcms_names = [f'PCM {i}F' for i in range(110, 142 + 1, 1)]
-    # pcms_names = ['90% Graphite infiltrated PCM'] 
+    # pcms_names = [f'PCM {i}F' for i in range(110, 142 + 1, 1)]
+    # # pcms_names = ['90% Graphite infiltrated PCM'] 
     
-    _ = plot_pcm_reference_and_deciles_plotly_F(pcms, pcms_names)
+    # _ = plot_pcm_reference_and_deciles_plotly_F(pcms, pcms_names)
     
     # fig, integral = pcm_enthalpy_integral_bar(pcms, pcms_names)
     # fig.show()

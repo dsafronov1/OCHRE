@@ -47,7 +47,7 @@ DEFAULT_PCM_PROPERTIES = {
 
 num_points = 10
 
-sa_ratios = [6]
+sa_ratios = [6.44]
 h_values = [5000]
 # 700 — 2200 in^2 for the MEPCM 66% vol fraction fill
 # sa_ratios = [0.673573, 0.817910, 0.962247, 1.106584, 1.250921, 1.395258, 1.539595, 1.683932, 1.828269, 1.972606, 2.116943]
@@ -69,13 +69,13 @@ h_values = [5000]
 # sa_ratios = np.linspace(2, 30, num_points)
 
 # case 2
-sa_ratios = np.linspace(1, 16, num_points)
+# sa_ratios = np.linspace(1, 16, num_points)
 
 # case 3
 # sa_ratios = np.linspace(1, 50, num_points)
 
 # h_values = np.linspace(np.log10(50), np.log10(5000), num_points)
-h_values = np.linspace(50, 5000, num_points)
+# h_values = np.linspace(50, 5000, num_points)
 # h_values = [500]
 # h_values = np.linspace(50, 5000, 20)
 
@@ -92,12 +92,12 @@ simulation_duration_days = 220
 # pcm_file_names = ['ct53_h-T_data_58frac.csv']W
 # pcm_file_names = ['ct53_h-T_data_57frac.csv']
 
-# pcm_file_names = ['ct53-resin_h-T_data_88frac.csv']
+pcm_file_names = ['ct53-resin_h-T_data_88frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_85frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_83frac.csv']
 # pcm_file_names = [f'100%_ct53-resin_h-T_data_88frac_{x}F.csv' for x in range (110, 142 + 1, 1)]
 # pcm_file_names = [f'100%_ct53-resin_h-T_data_88frac_{x}F.csv' for x in range (110, 142 + 1, 1)]
-pcm_file_names = ['ct53-resin_h-T_data_81frac.csv']
+# pcm_file_names = ['ct53-resin_h-T_data_81frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_77frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_55frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_45frac.csv']
@@ -183,6 +183,7 @@ default_args = {
     "save_results": None,  # if True, must specify output_path # None Merges the simulator results into 1 file
     "output_path": '../OCHRE_output/OCHRE_results/results/',
     "name": "ZDefault_ElectricResistanceWaterHeater",
+    "Mixed Delivery Temperature (C)": convert(125, "degF", "degC"),
     # "schedule_input_file": load_profile,
 }
 
@@ -931,28 +932,28 @@ if __name__ == "__main__":
                 
                 # i += 1
                 # Heat pump water heater
-                submission_time = time.perf_counter()
-                current_default_args = copy.deepcopy(default_args_default)
-                current_default_args['is_heatpump'] = True
-                no_pcm_title = f"{no_pcm_heatpump_title_base}_setpoint-{setpoint_temp_f:.0f}F_{tank_volume}gal_{i}"
-                current_default_args["name"] = no_pcm_title
-                no_pcm_future_heatpump = pool.apply_async(
-                    run_water_heater_process,
-                    (
-                        current_default_args,
-                        tank_volume,
-                        setpoint_temp_c,
-                        no_pcm_title,
-                        submission_time,
-                    ),
-                )
-                async_results.append(no_pcm_future_heatpump)
+                # submission_time = time.perf_counter()
+                # current_default_args = copy.deepcopy(default_args_default)
+                # current_default_args['is_heatpump'] = True
+                # no_pcm_title = f"{no_pcm_heatpump_title_base}_setpoint-{setpoint_temp_f:.0f}F_{tank_volume}gal_{i}"
+                # current_default_args["name"] = no_pcm_title
+                # no_pcm_future_heatpump = pool.apply_async(
+                #     run_water_heater_process,
+                #     (
+                #         current_default_args,
+                #         tank_volume,
+                #         setpoint_temp_c,
+                #         no_pcm_title,
+                #         submission_time,
+                #     ),
+                # )
+                # async_results.append(no_pcm_future_heatpump)
                 
-                i += 1
+                # i += 1
                 
-                print(
-                    f"{YELLOW}Submitted default {no_pcm_title} simulation to queue{RESET}"
-                )
+                # print(
+                #     f"{YELLOW}Submitted default {no_pcm_title} simulation to queue{RESET}"
+                # )
 
                 # Add all PCM variation tasks to the queue
                 for pcm_file_name in pcm_file_names:
