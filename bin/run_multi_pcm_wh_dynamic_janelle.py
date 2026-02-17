@@ -932,28 +932,28 @@ if __name__ == "__main__":
                 
                 # i += 1
                 # Heat pump water heater
-                # submission_time = time.perf_counter()
-                # current_default_args = copy.deepcopy(default_args_default)
-                # current_default_args['is_heatpump'] = True
-                # no_pcm_title = f"{no_pcm_heatpump_title_base}_setpoint-{setpoint_temp_f:.0f}F_{tank_volume}gal_{i}"
-                # current_default_args["name"] = no_pcm_title
-                # no_pcm_future_heatpump = pool.apply_async(
-                #     run_water_heater_process,
-                #     (
-                #         current_default_args,
-                #         tank_volume,
-                #         setpoint_temp_c,
-                #         no_pcm_title,
-                #         submission_time,
-                #     ),
-                # )
-                # async_results.append(no_pcm_future_heatpump)
+                submission_time = time.perf_counter()
+                current_default_args = copy.deepcopy(default_args_default)
+                current_default_args['is_heatpump'] = True
+                no_pcm_title = f"{no_pcm_heatpump_title_base}_setpoint-{setpoint_temp_f:.0f}F_{tank_volume}gal_{i}"
+                current_default_args["name"] = no_pcm_title
+                no_pcm_future_heatpump = pool.apply_async(
+                    run_water_heater_process,
+                    (
+                        current_default_args,
+                        tank_volume,
+                        setpoint_temp_c,
+                        no_pcm_title,
+                        submission_time,
+                    ),
+                )
+                async_results.append(no_pcm_future_heatpump)
                 
-                # i += 1
+                i += 1
                 
-                # print(
-                #     f"{YELLOW}Submitted default {no_pcm_title} simulation to queue{RESET}"
-                # )
+                print(
+                    f"{YELLOW}Submitted default {no_pcm_title} simulation to queue{RESET}"
+                )
 
                 # Add all PCM variation tasks to the queue
                 for pcm_file_name in pcm_file_names:

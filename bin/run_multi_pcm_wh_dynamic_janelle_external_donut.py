@@ -56,8 +56,8 @@ DEFAULT_PCM_PROPERTIES = {
     },
     "enthalpy_lut": "90-cp_h-T_data_shifted_120F.csv",
     "film_h": 50,
-    "external_pcm_thickness_in": 0.5,
-    "pcm_segment_thickness_inches": 0.2
+    "external_pcm_thickness_in": 1,
+    "pcm_segment_thickness_inches": 1
 }
 
 num_points = 10
@@ -89,10 +89,10 @@ setpoint_temps_c = [
 # films_h = np.logspace(np.log10(50), np.log10(1000), 11)
 # pcms_thickness_in = np.linspace(0.1, 1.25, 11)
 
-films_h = [150]
+films_h = [50,150]
 # pcms_thickness_in = [0.001,0.1,0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
 pcms_thickness_in = [1]
-pcms_segment_thickness_inches = [0.1]
+pcms_segment_thickness_inches = [1]
 # pcms_segment_thickness_inches = [1.2]
 
 # tank_volume_gal = [40,50, 65]
@@ -693,8 +693,8 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
         "HPWH COP (-)": 4.2, #adjusted from bigladder
         "duration": duration,
         **default_args,
-        # "time_res": dt.timedelta(minutes=1),
-        "time_res": dt.timedelta(seconds=0.5),
+        "time_res": dt.timedelta(minutes=1),
+        # "time_res": dt.timedelta(seconds=0.5),
         "hp_only_mode": True
     }
 

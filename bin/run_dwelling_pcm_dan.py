@@ -4,6 +4,7 @@ import pandas as pd
 
 from ochre import Dwelling, Analysis, CreateFigures
 from ochre.Models import TankWithMultiPCM
+from ochre.Models.WaterPCM import TankWithMultiPCMExternal
 from ochre.utils import default_input_path
 
 # Test script to run single Dwelling
@@ -39,6 +40,17 @@ DEFAULT_PCM_PROPERTIES = {
 "enthalpy_lut_file": "cp_h-T_data_shifted_120F.csv",
 }
 
+DEFAULT_PCM_PROPERTIES_EXTERNAL = {
+    "solid": {
+        "pcm_density": 0.991,  # g/cm**3 10% graphite 90% pcm
+        "pcm_cp": 0.6,  # J/g-C # adjusted by real measurements average from 0-45c
+        # "pcm_conductivity": 0.28,  # W/m-C, not used Bulk PCM conductivity
+        "pcm_conductivity": 10,  # W/m-C, not used graphite infiltrated PCM conductivity
+        # "pcm_c": 1717.6,  # J/m**3-C, not used
+    },
+    "enthalpy_lut": "cp_h-T_data_shifted_120F.csv",
+}
+
 
 dwelling_args = {
     # 'name': 'OCHRE_Test_House'  # simulation name
@@ -46,7 +58,7 @@ dwelling_args = {
     # Timing parameters
     'start_time': dt.datetime(2018, 1, 1, 0, 0),  # year, month, day, hour, minute
     'time_res': dt.timedelta(minutes=1),         # time resolution of the simulation
-    'duration': dt.timedelta(days=365),             # duration of the simulation
+    'duration': dt.timedelta(days=2),             # duration of the simulation
     'initialization_time': dt.timedelta(days=1),  # used to create realistic starting temperature
     'time_zone': None,                            # option to specify daylight savings, in development
 
@@ -112,15 +124,40 @@ dwelling_args = {
         #         'save_results': True,
         #     },
         # },
+        # 'Heat Pump Water Heater': {
+        #     'HPWH COP (-)': 4.5,
+        #     'Tank Volume (L)': 40 * 3.78541,
+        #     'hp_only_mode': True,
+        #     "model_class": TankWithMultiPCM,
+        #     "Setpoint Temperature (C)": 60,
+        #     "Water Tank": {
+        #         "pcm_node_vol_fractions": pcm_vol_fractions[0],
+        #         "pcm_properties": DEFAULT_PCM_PROPERTIES,
+        #     },
+        # },
         'Heat Pump Water Heater': {
             'HPWH COP (-)': 4.5,
             'Tank Volume (L)': 40 * 3.78541,
             'hp_only_mode': True,
-            "model_class": TankWithMultiPCM,
+            "model_class": TankWithMultiPCMExternal,
             "Setpoint Temperature (C)": 60,
             "Water Tank": {
-                "pcm_node_vol_fractions": pcm_vol_fractions[0],
                 "pcm_properties": DEFAULT_PCM_PROPERTIES,
+                "pcm_thickness_in": 1,
+                "pcm_segment_thickness_in": 1,  # in PCM thickness
+                "insulation_thickness_in": 2,  # this is pcm + insulation thickness aka the max thickness outside of the tank
+                "insulation_k_value": 0.0484,  # W/m·K
+                "insulation_cp_value": 1000.0,  # J/kg·K
+                "insulation_density": 40.0,  # kg/m³
+                "enamel_thickness_in": 0.008,  # ≈0.2 mm glass-enamel
+                "enamel_k_value": 1.0,  # W/m·K (vitreous enamel)
+                "enamel_cp_value": 840.0,  # J/kg·K (glass)
+                "enamel_density": 2500.0,  # kg/m³ (glass)
+                "steel_wall_thickness_in": 0.1,  # ≈2.75 mm total wall
+                "steel_k_value": 55.0,  # W/m·K mildsteel
+                "steel_cp_value": 490.0,  # J/kg·K mild steel
+                "steel_density": 7850.0,  # kg/m³
+                "water_side_film_h": 50,  # W/m²·K This value various with flow rate is set static for now
             },
         },
         # 'Electric Resistance Water Heater': {
