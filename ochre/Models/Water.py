@@ -169,9 +169,11 @@ class StratifiedWaterModel(RCModel):
             self.draw_tempered = draw_tempered
             if self.outlet_temp <= self.tempered_draw_temp:
                 self.draw_total += draw_tempered
+                self.draw_tempered_temperature = self.outlet_temp
             else:
                 vol_ratio = (self.tempered_draw_temp - self.mains_temp) / (self.outlet_temp - self.mains_temp)
                 self.draw_total += draw_tempered * vol_ratio
+                self.draw_tempered_temperature = self.tempered_draw_temp
                 # self.draw_total += draw_tempered
         # if draw_cw:
         #     if self.outlet_temp <= self.washer_draw_temp:
@@ -354,7 +356,8 @@ class StratifiedWaterModel(RCModel):
             results["Hot Water Delivered (W)"] = self.h_delivered
         if self.verbosity >= 7:
             results["Hot Water Heat Injected (W)"] = self.h_injections
-            results["Total Water Output (L/min)"] = self.draw_tempered
+            results["Total Water Output Delivered (L/min)"] = self.draw_tempered
+            results["Total Water Outlet Delivered Temperature (C)"] = self.draw_tempered_temperature
             results["Hot Water Heat Loss (W)"] = self.h_loss
             if "pcm" in self.name.lower():
                 results["Hot Water Average Temperature (C)"] = self.states[:self.n_nodes].dot(self.vol_fractions)

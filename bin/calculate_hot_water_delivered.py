@@ -51,13 +51,27 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
         pcm_columns = [col for col in df_copy.columns if col.startswith('T_PCM')]
         if len(pcm_columns) > 0:
             is_pcm = True
-            pcm_enthalpy_column   = 'Total PCM Enthalpy (J)'
-            starting_pcm_enthalpy = df_copy[pcm_enthalpy_column].iloc[0]
+            PCM_COLUMN_ALIASES = {
+                "total_pcm_enthalpy": [
+                    "Total PCM Enthalpy (J)",
+                    "Total Water Heater PCM Enthalpy (J)",
+                ],
+            }
+
+            def get_first_existing_column(df, aliases):
+                for col in aliases:
+                    if col in df.columns:
+                        return df[col]
+                raise KeyError(f"None of the columns found: {aliases}")
+
+        # Usage
+            pcm_series = get_first_existing_column(df_copy, PCM_COLUMN_ALIASES["total_pcm_enthalpy"])
+            starting_pcm_enthalpy = pcm_series.iloc[0]
             df_copy['average_pcm_temp'] = df_copy[pcm_columns].mean(axis=1)
             df_copy['is_cutoff_temp'] = df_copy[pcm_columns].lt(water_temp_cutoff).all(axis=1)
             try:
                 cutoff_index      = df_copy[df_copy['is_cutoff_temp']].index[0]
-                baseline_enthalpy = df_copy[pcm_enthalpy_column][cutoff_index]
+                baseline_enthalpy = df_copy[pcm_series][cutoff_index]
             except Exception:
                 # Fallback: interpolate enthalpy at cutoff temp from LUT
                 m = re.search(r'setpoint-[^_]+_(.*?)_\d+gal', file_key)
