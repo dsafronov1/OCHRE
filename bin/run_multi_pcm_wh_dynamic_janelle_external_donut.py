@@ -689,12 +689,13 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
         "Tank Volume (L)": tank_volume * GAL_TO_L * 0.9,
         "Tank Height (m)": 1.22,
         "UA (W/K)": 2.6389, #adjusted from bigladder
+        "Mixed Delivery Temperature (C)": convert(125, 'degF', 'degC'),
         # "UA (W/K)": 1e-9,
         "HPWH COP (-)": 4.2, #adjusted from bigladder
         "duration": duration,
         **default_args,
-        "time_res": dt.timedelta(minutes=1),
-        # "time_res": dt.timedelta(seconds=0.5),
+        # "time_res": dt.timedelta(minutes=1),
+        "time_res": dt.timedelta(seconds=0.5),
         "hp_only_mode": True
     }
 

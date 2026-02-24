@@ -174,7 +174,8 @@ def export_draw_outputs_csv(draw_outputs, csv_path="../OCHRE_results/results_csv
     preferred_order = [
         "file_key", "is_default", "case", "fill_fraction", "pcm_nodes_start", "pcm_nodes_end",
         "heater_type", "SA_V_ratio", "H_conv", "setpoint_F", "pcm_material", "gallons", "run_index",
-        "average_pcm_end_temp", "pcm_soc", "total_water_volume_L", "total_water_volume_gal",
+        "average_pcm_end_temp", "pcm_soc", "total_water_delivered_volume_L", "total_water_delivered_volume_gal",
+        "total_water_FHR_volume_L", "total_water_FHR_volume_gal",
         "total_energy_used_kwh", "total_heat_delivered_J", "total_heat_delivered_kWh",
         "max_possible_hot_water_gal", "is_FHR", "num_draw_events", "draw_events_json"
     ]

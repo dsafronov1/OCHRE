@@ -16,11 +16,12 @@ GAL_TO_L = 3.78541 # gallons to liters conversion
 
 
 def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_GAL_RATIO=0.264172):
-    water_draw_col       = "Total Water Output (L/min)"
+    water_draw_col       = "Total Water Output Delivered (L/min)"
     water_output_W_col   = "Hot Water Delivered (W)"
     water_draw_tank_col  = "Hot Water Delivered (L/min)"
     inlet_temp_col       = "Hot Water Mains Temperature (C)"
-    water_outlet_temp    = "Hot Water Outlet Temperature (C)"
+    water_heater_outlet_temp    = "Hot Water Outlet Temperature (C)"
+    water_outlet_temp           = "Total Water Output Delivered Temperature (C)"
     energy_used_col      = "Water Heating Delivered (W)"
     try:
         df_copy = df.copy()
@@ -61,11 +62,12 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
             def get_first_existing_column(df, aliases):
                 for col in aliases:
                     if col in df.columns:
-                        return df[col]
+                        return col
                 raise KeyError(f"None of the columns found: {aliases}")
 
         # Usage
-            pcm_series = get_first_existing_column(df_copy, PCM_COLUMN_ALIASES["total_pcm_enthalpy"])
+            pcm_enthalpy_col = get_first_existing_column(df_copy, PCM_COLUMN_ALIASES["total_pcm_enthalpy"])
+            pcm_series = df_copy[pcm_enthalpy_col]
             starting_pcm_enthalpy = pcm_series.iloc[0]
             df_copy['average_pcm_temp'] = df_copy[pcm_columns].mean(axis=1)
             df_copy['is_cutoff_temp'] = df_copy[pcm_columns].lt(water_temp_cutoff).all(axis=1)
@@ -89,17 +91,15 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
             flow_L_per_min = row[water_draw_col]
             tank_L_per_min = row[water_draw_tank_col]
             intlet_temp_C  = row[inlet_temp_col]
-            tank_outlet_temp_C         = row[water_outlet_temp]
-            tank_flow_percentage = tank_flow_percentage = (tank_L_per_min / flow_L_per_min) if flow_L_per_min not in (0, None) else 0
-            inlet_flow_percentage = 1-tank_flow_percentage
-            temp_C = (inlet_flow_percentage * intlet_temp_C) + (tank_flow_percentage * tank_outlet_temp_C) 
+            temp_C         = row[water_outlet_temp]
+
             heat_W         = row[water_output_W_col]
             dt             = float(row['time_delta'])
             if dt < 0 or not np.isfinite(dt):
                 dt = 0.0
             if is_pcm:
                 avg_end_pcm_temp = row['average_pcm_temp']
-                enthalpy         = row['Total PCM Enthalpy (J)']
+                enthalpy         = row[pcm_enthalpy_col]
 
             if flow_L_per_min > 0:
                 if not is_draw_active:
@@ -162,12 +162,15 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
 
         # aggregate totals
         total_water_volume_gal   = total_water_volume_L * 0.264172
+        total_water_drawn_volume_L = total_water_volume_L
+        total_water_drawn_volume_gal = total_water_volume_gal
         total_heat_delivered_kWh = total_heat_delivered_J * 2.77778e-7
         # integrate energy with dt (assumes W)
         total_energy_used_kwh = float(((df_copy['Water Heating Delivered (W)'] * df_copy['time_delta']).sum()) / 3600.0 / 1000.0)
 
         # first-hour adjustment
         if first_hour_test and len(draw_events) >= 2:
+            
             final = draw_events[-1]
             prev  = draw_events[-2]
             dur = (final['end_time'] - final['start_time']).total_seconds()
@@ -179,12 +182,13 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
                 total_water_volume_gal = adjusted_gal
                 total_water_volume_L   = total_water_volume_gal / 0.264172
 
+
         # PCM tail metrics
         try:
             if is_pcm and len(pcm_columns) > 0:
                 pcm_temps = [df[col].iloc[-1] for col in pcm_columns]
                 average_pcm_end_temp = float(np.mean(pcm_temps))
-                pcm_soc = (df_copy['Total PCM Enthalpy (J)'].iloc[-1] - baseline_enthalpy) / ((starting_pcm_enthalpy - baseline_enthalpy) or 1.0)
+                pcm_soc = (df_copy[pcm_enthalpy_col].iloc[-1] - baseline_enthalpy) / ((starting_pcm_enthalpy - baseline_enthalpy) or 1.0)
             else:
                 average_pcm_end_temp = 14.44
                 pcm_soc = -100
@@ -196,8 +200,10 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
         return file_key, {
             "average_pcm_end_temp": average_pcm_end_temp,
             "pcm_soc": pcm_soc,
-            'total_water_volume_L': total_water_volume_L,
-            'total_water_volume_gal': total_water_volume_gal,
+            'total_water_delivered_volume_L': total_water_drawn_volume_L,
+            'total_water_delivered_volume_gal': total_water_drawn_volume_gal,
+            'total_water_FHR_volume_L': total_water_volume_L,
+            'total_water_FHR_volume_gal': total_water_volume_gal,
             'total_energy_used_kwh': total_energy_used_kwh,
             'total_heat_delivered_J': total_heat_delivered_J,
             'total_heat_delivered_kWh': total_heat_delivered_kWh,
