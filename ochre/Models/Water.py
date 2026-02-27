@@ -1,4 +1,5 @@
 import numpy as np
+import csv
 
 from ochre.Models import RCModel, ModelException
 from ochre.utils import convert
@@ -38,7 +39,7 @@ class StratifiedWaterModel(RCModel):
 
     name = "Water Tank"
     optional_inputs = [
-        "Water Heating (L/min)",
+        "Water Fixtures (L/min)",
         "Clothes Washer (L/min)",
         "Dishwasher (L/min)",
         "Mains Temperature (C)",
@@ -138,10 +139,18 @@ class StratifiedWaterModel(RCModel):
         self.draw_tempered_temperature = self.outlet_temp
 
         # Note: removing target draw temperature for clothes washers, not implemented in ResStock
-        draw_tempered = self.current_schedule.get("Water Heating (L/min)", 0)
+        draw_tempered = self.current_schedule.get("Water Fixtures (L/min)", 0)
         draw_hot = self.current_schedule.get("Clothes Washer (L/min)", 0) + self.current_schedule.get(
             "Dishwasher (L/min)", 0
         )
+        #    # Specify the CSV file name
+        #csv_file = "water_heating_values.csv"
+		#
+        ## Append the current value to the CSV file
+        #with open(csv_file, mode="a", newline="") as file:
+        #    writer = csv.writer(file)
+        #    writer.writerow([draw_hot])  # Write timestep and value
+
         # draw_cw = self.current_schedule.get('Clothes Washer (L/min)', 0)
         # draw_hot = self.current_schedule.get('Dishwasher (L/min)', 0)
         if not (draw_tempered + draw_hot):
@@ -189,6 +198,13 @@ class StratifiedWaterModel(RCModel):
         draw_liters = self.draw_total * t_s / 60  # in liters
         draw_fraction = draw_liters / self.volume  # unitless
         water_temps = self.states[:self.n_nodes]  # cuts off PCM, other non-water nodes
+
+        # csv_draw = "draw_tempered_values.csv"
+
+        # # Append the current value to the CSV file
+        # with open(csv_draw, mode="a", newline="") as draw_file:
+        #     writer = csv.writer(draw_file)
+        #     writer.writerow([draw_tempered])  # Write timestep and value
 
         if self.n_nodes == 2 and draw_fraction < self.vol_fractions[1]:
             # Use empirical factor for determining water flow by node
