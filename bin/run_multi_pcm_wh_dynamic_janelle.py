@@ -15,7 +15,7 @@ import time
 from bin.run_dwelling import dwelling_args
 import multiprocessing
 import copy
-
+import re
 
 # ANSI Terminal color codes
 RESET = "\033[0m"
@@ -28,6 +28,7 @@ RED = "\033[91m"
 
 
 GAL_TO_L = 3.78541
+L_TO_GAL_RATIO = 0.264172
 
 
 start_node = 4
@@ -282,7 +283,7 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
                     test_timer = float(first_hour_duration)
                     draw_active = True
                     control_signal = {
-                        'Water Heating (L/min)': draw_rate_gpm * GAL_TO_L
+                        'Water Fixtures (L/min)': draw_rate_gpm * GAL_TO_L
                     }
                     if disable_heating_during_draw:
                         control_signal['Water Heating Setpoint (C)'] = 5
@@ -317,7 +318,7 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
                     print(f"[{t}] ({pcm_label()}) → reached setpoint ({wh.model.outlet_temp:.1f}C), STARTING draw")
 
                 if draw_active:
-                    control_signal['Water Heating (L/min)'] = draw_rate_gpm * GAL_TO_L
+                    control_signal['Water Fixtures (L/min)'] = draw_rate_gpm * GAL_TO_L
                     if disable_heating_during_draw:
                         control_signal['Water Heating Setpoint (C)'] = 5
                     total_gallons_delivered += draw_rate_gpm * delta_min
@@ -464,7 +465,7 @@ def create_water_schedule(
     # Create the DataFrame with all variables
     schedule = pd.DataFrame(
         {
-            "Water Heating (L/min)": water_withdraw,
+            "Water Fixtures (L/min)": water_withdraw,
             "Water Heating Setpoint (C)": setpoint_temp,
             "Water Heating Deadband (C)": deadband,
             "Zone Temperature (C)": zone_temp,
@@ -601,102 +602,100 @@ def calculate_net_water_energy(volume, temperature, temperature_difference):
     return water_weight_average * temperature_difference * 4184  # J
 
 
-def calculate_uef(df, water_volume):
+def calculate_uef(df, name):
     """
-    Calculate a single UEF value over the provided dataframe using time-integrated energy terms.
-
-    Differences vs previous version:
-      - Uses the DataFrame's DateTimeIndex for timing (no 'Time' column).
-      - Integrates power over variable dt (seconds) derived from the index.
-
-    Requirements:
-      - df is indexed by datetime (or index parsable to datetime).
-      - Columns required:
-          'Water Heating Electric Power (kW)'  (instantaneous power)
-          'Hot Water Delivered (W)'            (instantaneous power)
-          'Hot Water Average Temperature (C)'  (for bulk-water energy adjustment)
-      - Optionally:
-          'Water Volume (L)' (if absent, uses the water_volume argument)
-      - Helper functions available in scope:
-          calculate_net_PCM_heat(df),
-          calculate_net_PCM_enthalpy(df),
-          calculate_net_water_temp(df),
-          calculate_net_water_energy(volume_L, T_final_C, delta_T_C)
-    Returns:
-      - float UEF, or np.nan if not computable
+    Calculates two UEF values:
+      - 'uef_all': UEF over the entire dataframe
+      - 'uef_last_day': UEF using only rows from the last calendar day present in df['Time']
+    Returns a dict: {'uef_all': float|np.nan, 'uef_last_day': float|np.nan}
     """
+    import pandas as pd
+    import numpy as np
 
-    if df is None or len(df) == 0:
-        return np.nan
+    def _parse_time(series: pd.Series) -> pd.Series:
+        # Support mixed timestamp formats (with/without fractional seconds).
+        return pd.to_datetime(series, errors="coerce", format="mixed")
 
-    # Work on a copy to avoid mutating caller's df
-    local = df.copy()
+    def parse_tank_volume_from_name(filename):
+        """
+        Parses a filename to extract tank volume in gallons.
+        Returns a tuple: (volume_in_gal, is_default)
+        """
+        is_default = "zDefault" in filename
+        match = re.search(r'_([0-9]+(?:\.[0-9]+)?)gal_', filename)
+        volume = float(match.group(1)) if match else None
+        return volume, is_default
 
-    # Ensure DateTimeIndex; try to coerce if not already
-    if not isinstance(local.index, pd.DatetimeIndex):
-        try:
-            local.index = pd.to_datetime(local.index, errors="coerce")
-        except Exception:
+    def _compute_uef_for_df(local_df: pd.DataFrame) -> float:
+        if local_df.empty:
             return np.nan
 
-    # Drop any NaT index rows that may result from coercion
-    local = local[~local.index.isna()]
-    if len(local) == 0:
-        return np.nan
-
-    # Sort by time and compute dt (seconds) from the index
-    local = local.sort_index()
-    # Use vectorized diff on the index to avoid alignment pitfalls
-    idx_vals = local.index.view("int64")  # nanoseconds since epoch
-    dt_s = np.diff(idx_vals, prepend=idx_vals[0]) / 1e9  # seconds; first element gets 0
-
-    # Validate required columns
-    required_cols = [
-        "Water Heating Electric Power (kW)",
-        "Hot Water Delivered (W)",
-        "Hot Water Average Temperature (C)",
-    ]
-    if any(col not in local.columns for col in required_cols):
-        return np.nan
-
-    # Integrate electric consumption: kW -> W, then multiply by seconds
-    Q_cons = np.sum((local["Water Heating Electric Power (kW)"].to_numpy() * 1000.0) * dt_s)
-
-    # Integrate delivered hot water energy: W * s
-    Q_load = np.sum(local["Hot Water Delivered (W)"].to_numpy() * dt_s)
-
-    # PCM and bulk-water state adjustments (energy terms over the window)
-    _PCM_Q_Heat_to_Water = calculate_net_PCM_heat(local)  # retained for parity; not used directly
-    PCM_net_enthalpy = calculate_net_PCM_enthalpy(local)  # energy (e.g., J = W·s)
-    PCM_net_heat_loss = PCM_net_enthalpy
-
-    water_net_temp_delta = calculate_net_water_temp(local)
-
-    # Determine effective water volume (L)
-    if "Water Volume (L)" in local.columns:
-        try:
-            water_volume_L = float(local["Water Volume (L)"].iloc[-1])
-        except Exception:
+        local = local_df.copy()
+        local['Time'] = _parse_time(local['Time'])
+        local = local.dropna(subset=['Time'])
+        if local.empty:
             return np.nan
-    elif water_volume is not None:
-        try:
-            water_volume_L = float(water_volume)
-        except Exception:
+        local = local.sort_values('Time')
+        local['dt_s'] = local['Time'].diff().dt.total_seconds().fillna(0)
+
+        # Electric heating energy (kW → W, then multiply by seconds)
+        Q_cons = ((local["Water Heating Electric Power (kW)"] * 1000) * local['dt_s']).sum()
+
+        # Hot water delivered energy (already W, multiply by seconds)
+        Q_load = (local["Hot Water Delivered (W)"] * local['dt_s']).sum()
+
+        # PCM and water state adjustments (based on your existing helpers)
+        PCM_Q_Heat_to_Water = calculate_net_PCM_heat(local)  # kept for parity; not directly used below
+        PCM_net_enthalpy = calculate_net_PCM_enthalpy(local)
+        PCM_net_heat_loss = PCM_net_enthalpy
+        water_net_temp_delta = calculate_net_water_temp(local)
+
+        water_volume_col = "Water Volume (L)"
+        if water_volume_col in local.columns:
+            water_volume_L = local[water_volume_col].iloc[-1]
+        else:
+            tank_volume, _is_default_case = parse_tank_volume_from_name(name)
+            tank_volume *= 0.9  # effective water fraction
+            water_volume_L = tank_volume / L_TO_GAL_RATIO
+
+        # Net energy to change bulk water temperature over the window
+        water_net_energy = calculate_net_water_energy(
+            water_volume_L,
+            local['Hot Water Average Temperature (C)'].iloc[-1],
+            water_net_temp_delta
+        )
+
+        Q_cons_adjusted = Q_cons - PCM_net_heat_loss - water_net_energy
+        if not np.isfinite(Q_cons_adjusted) or Q_cons_adjusted == 0:
             return np.nan
+
+        return Q_load / Q_cons_adjusted
+
+        # ---- Whole-dataset UEF ----
+    df_all = df.copy()
+
+    # If index is already named 'Time', use it directly.
+    if df_all.index.name == "Time":
+        df_all = df_all.reset_index()
     else:
-        return np.nan  # insufficient info to compute bulk-water energy change
+        df_all["Time"] = df_all.index
 
-    # Net energy for changing bulk water temperature over the interval (energy units)
-    T_final_C = float(local["Hot Water Average Temperature (C)"].iloc[-1])
-    water_net_energy = calculate_net_water_energy(water_volume_L, T_final_C, water_net_temp_delta)
+    df_all["Time"] = _parse_time(df_all["Time"])
+    df_all = df_all.dropna(subset=["Time"])
+    df_all = df_all.sort_values("Time")
 
-    # Adjusted consumption (subtract stored-state changes)
-    Q_cons_adjusted = Q_cons - PCM_net_heat_loss - water_net_energy
+    uef_all = _compute_uef_for_df(df_all)
 
-    if not np.isfinite(Q_cons_adjusted) or Q_cons_adjusted == 0:
-        return np.nan
+    # ---- Last calendar day UEF ----
+    if df_all.empty:
+        uef_last_day = np.nan
+    else:
+        last_day = df_all['Time'].max().normalize()  # calendar day of the last timestamp
+        df_last_day = df_all[df_all['Time'].dt.normalize() == last_day]
+        # Recompute on the sliced day to get correct dt_s within the day
+        uef_last_day = _compute_uef_for_df(df_last_day)
 
-    return Q_load / Q_cons_adjusted
+    return {"uef_all": uef_all, "uef_last_day": uef_last_day}
 
 
 def run_water_heater_electric(default_args, setpoint_temp, tank_volume):
@@ -1063,7 +1062,7 @@ if __name__ == "__main__":
         print(
             f"{GREEN}{process}: simulation time = {data['sim_time']:.2f} sec, "
             f"wait time = {data['wait_time']:.2f} sec, total = {data['total_task_time']:.2f} sec, "
-            f"UEF: {data['uef']:.6f}{RESET}"
+            f"UEF: {data['uef']}{RESET}"
         )
 
     # --- Calculate and print overall overhead statistics ---
