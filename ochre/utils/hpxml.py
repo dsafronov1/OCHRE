@@ -1170,12 +1170,13 @@ def parse_water_heater(water_heater, water, construction, solar_fraction=0):
         # Add/update parameters for low power HPWH
         # FIXME: temporary flag for designating 120V HPWHs in panels branch of ResStock
         if uniform_energy_factor == 4.9:
+            print("test")
             wh.update(
                 {
                     "Low Power HPWH": True,
                     "HPWH COP (-)": 4.2,
                     "HPWH Capacity (W)": 1499.4,
-                    "Setpoint Temperature (C)": convert(140, "degF", "degC"),
+                    # "Setpoint Temperature (C)": convert(140, "degF", "degC"),
                     "Tempering Valve Setpoint (C)": convert(125, "degF", "degC"),
                     "hp_only_mode": True,
                 }

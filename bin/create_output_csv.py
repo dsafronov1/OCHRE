@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import datetime as dt
 
-def export_draw_outputs_csv(draw_outputs, csv_path="../OCHRE_results/results_csv/results.csv"):
+def export_draw_outputs_csv(draw_outputs, uef_totals, csv_path="../OCHRE_results/results_csv/results.csv"):
 
     if not os.path.exists(os.path.dirname(csv_path)):
         os.makedirs(os.path.dirname(csv_path))
@@ -150,25 +150,39 @@ def export_draw_outputs_csv(draw_outputs, csv_path="../OCHRE_results/results_csv
         return _parse_full_name(name)
 
     rows = []
-    for file_key, metrics in draw_outputs.items():
+    for (file_key, metrics), uef in zip(draw_outputs.items(), uef_totals):
         parsed = parse_file_key(file_key)
         record = parsed.copy()
+
+        # Add UEF metrics immediately before is_FHR
+        record["uef_all"] = uef.get("uef_all", np.nan) if isinstance(uef, dict) else np.nan
+        record["uef_last_day"] = uef.get("uef_last_day", np.nan) if isinstance(uef, dict) else np.nan
+
         # Always include is_FHR field, even if missing
         record["is_FHR"] = metrics.get("is_FHR", False)
+
         for k, v in metrics.items():
             if k == "draw_events":
-                # remove temp_readings to minimize file size
                 for event in metrics[k]:
                     event.pop("temp_readings", None)
-                record["draw_events_json"] = json.dumps(v, default=_json_default, separators=(",", ":"), ensure_ascii=False)
+                record["draw_events_json"] = json.dumps(
+                    v, default=_json_default, separators=(",", ":"), ensure_ascii=False
+                )
             else:
                 if isinstance(v, (list, dict, tuple, set, pd.Series, np.ndarray)):
-                    record[k] = json.dumps(v, default=_json_default, separators=(",", ":"), ensure_ascii=False)
+                    record[k] = json.dumps(
+                        v, default=_json_default, separators=(",", ":"), ensure_ascii=False
+                    )
                 else:
                     try:
-                        record[k] = _json_default(v) if isinstance(v, (pd.Timestamp, dt.datetime, dt.date, dt.time, dt.timedelta, np.generic)) else v
+                        record[k] = (
+                            _json_default(v)
+                            if isinstance(v, (pd.Timestamp, dt.datetime, dt.date, dt.time, dt.timedelta, np.generic))
+                            else v
+                        )
                     except Exception:
                         record[k] = v
+
         rows.append(record)
 
     preferred_order = [
@@ -177,7 +191,7 @@ def export_draw_outputs_csv(draw_outputs, csv_path="../OCHRE_results/results_csv
         "average_pcm_end_temp", "pcm_soc", "total_water_delivered_volume_L", "total_water_delivered_volume_gal",
         "total_water_FHR_volume_L", "total_water_FHR_volume_gal",
         "total_energy_used_kwh", "total_heat_delivered_J", "total_heat_delivered_kWh",
-        "max_possible_hot_water_gal", "is_FHR", "num_draw_events", "draw_events_json"
+        "max_possible_hot_water_gal", "uef_all", "uef_last_day", "is_FHR", "num_draw_events", "draw_events_json"
     ]
 
     df = pd.DataFrame(rows)

@@ -16,6 +16,7 @@ import time
 from bin.run_dwelling import dwelling_args
 import multiprocessing
 import copy
+import re
 
 
 # ANSI Terminal color codes
@@ -29,6 +30,7 @@ RED = "\033[91m"
 
 
 GAL_TO_L = 3.78541
+L_TO_GAL_RATIO = 0.264172
 
 
 start_node = 4
@@ -170,7 +172,7 @@ default_args = {
     "save_results": None,  # if True, must specify output_path # None Merges the simulator results into 1 file
     "output_path": '../OCHRE_output/OCHRE_results/results/',
     "name": "ZDefault_ElectricResistanceWaterHeater",
-    # "schedule_input_file": load_profile,
+    "schedule_input_file": load_profile,
 }
 
 def import_water_heating_schedule(schedule_file):
@@ -258,8 +260,11 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
                     test_timer = float(first_hour_duration)
                     draw_active = True
                     control_signal = {
-                        'Water Heating (L/min)': draw_rate_gpm * GAL_TO_L
+                        'Water Fixtures (L/min)': draw_rate_gpm * GAL_TO_L
                     }
+                    # Water heating
+                    # Clothes Washer
+                    # Dishwasher
                     if disable_heating_during_draw:
                         control_signal['Water Heating Setpoint (C)'] = 5
                     print(f"[{t}] → FIRST-HOUR test STARTED, drawing {draw_rate_gpm} gpm")
@@ -293,7 +298,7 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
                     print(f"[{t}] → reached setpoint ({wh.model.outlet_temp:.1f}C), STARTING draw")
 
                 if draw_active:
-                    control_signal['Water Heating (L/min)'] = draw_rate_gpm * GAL_TO_L
+                    control_signal['Water Fixtures (L/min)'] = draw_rate_gpm * GAL_TO_L
                     if disable_heating_during_draw:
                         control_signal['Water Heating Setpoint (C)'] = 5
                     total_gallons_delivered += draw_rate_gpm * delta_min
@@ -441,7 +446,7 @@ def create_water_schedule(
     # Create the DataFrame with all variables
     schedule = pd.DataFrame(
         {
-            "Water Heating (L/min)": water_withdraw,
+            "Water Fixtures (L/min)": water_withdraw,
             "Water Heating Setpoint (C)": setpoint_temp,
             "Water Heating Deadband (C)": deadband,
             "Zone Temperature (C)": zone_temp,
@@ -578,32 +583,100 @@ def calculate_net_water_energy(volume, temperature, temperature_difference):
     return water_weight_average * temperature_difference * 4184  # J
 
 
-def calculate_uef(df, water_volume):
-    # calculate UEF of the water tank
-    df['Time'] = df.index
-    df['dt_s'] = df['Time'].diff().dt.total_seconds().fillna(0)
+def calculate_uef(df, name):
+    """
+    Calculates two UEF values:
+      - 'uef_all': UEF over the entire dataframe
+      - 'uef_last_day': UEF using only rows from the last calendar day present in df['Time']
+    Returns a dict: {'uef_all': float|np.nan, 'uef_last_day': float|np.nan}
+    """
+    import pandas as pd
+    import numpy as np
 
-    # Electric heating energy (from kW to W, then multiply by seconds)
-    Q_cons = ((df["Water Heating Electric Power (kW)"] * 1000) * df['dt_s']).sum()
+    def _parse_time(series: pd.Series) -> pd.Series:
+        # Support mixed timestamp formats (with/without fractional seconds).
+        return pd.to_datetime(series, errors="coerce", format="mixed")
 
-    # Hot water delivered energy (already in W, multiply by seconds)
-    Q_load = (df["Hot Water Delivered (W)"] * df['dt_s']).sum()
+    def parse_tank_volume_from_name(filename):
+        """
+        Parses a filename to extract tank volume in gallons.
+        Returns a tuple: (volume_in_gal, is_default)
+        """
+        is_default = "zDefault" in filename
+        match = re.search(r'_([0-9]+(?:\.[0-9]+)?)gal_', filename)
+        volume = float(match.group(1)) if match else None
+        return volume, is_default
 
-    PCM_Q_Heat_to_Water = calculate_net_PCM_heat(df)  # make sure in W*min
-    PCM_net_enthalpy = calculate_net_PCM_enthalpy(df)
-    PCM_net_heat_loss = PCM_net_enthalpy
-    water_net_temp_delta = calculate_net_water_temp(df)
-    water_net_energy = (
-        calculate_net_water_energy(
-            water_volume,
-            df["Hot Water Average Temperature (C)"].iloc[-1],
-            water_net_temp_delta,
+    def _compute_uef_for_df(local_df: pd.DataFrame) -> float:
+        if local_df.empty:
+            return np.nan
+
+        local = local_df.copy()
+        local['Time'] = _parse_time(local['Time'])
+        local = local.dropna(subset=['Time'])
+        if local.empty:
+            return np.nan
+        local = local.sort_values('Time')
+        local['dt_s'] = local['Time'].diff().dt.total_seconds().fillna(0)
+
+        # Electric heating energy (kW → W, then multiply by seconds)
+        Q_cons = ((local["Water Heating Electric Power (kW)"] * 1000) * local['dt_s']).sum()
+
+        # Hot water delivered energy (already W, multiply by seconds)
+        Q_load = (local["Hot Water Delivered (W)"] * local['dt_s']).sum()
+
+        # PCM and water state adjustments (based on your existing helpers)
+        PCM_Q_Heat_to_Water = calculate_net_PCM_heat(local)  # kept for parity; not directly used below
+        PCM_net_enthalpy = calculate_net_PCM_enthalpy(local)
+        PCM_net_heat_loss = PCM_net_enthalpy
+        water_net_temp_delta = calculate_net_water_temp(local)
+
+        water_volume_col = "Water Volume (L)"
+        if water_volume_col in local.columns:
+            water_volume_L = local[water_volume_col].iloc[-1]
+        else:
+            tank_volume, _is_default_case = parse_tank_volume_from_name(name)
+            tank_volume *= 0.9  # effective water fraction
+            water_volume_L = tank_volume / L_TO_GAL_RATIO
+
+        # Net energy to change bulk water temperature over the window
+        water_net_energy = calculate_net_water_energy(
+            water_volume_L,
+            local['Hot Water Average Temperature (C)'].iloc[-1],
+            water_net_temp_delta
         )
-    )  # make sure in W*min
-    Q_cons_total = Q_cons - PCM_net_heat_loss - water_net_energy  # make sure in W*min
-    UEF = Q_load / Q_cons_total
 
-    return UEF
+        Q_cons_adjusted = Q_cons - PCM_net_heat_loss - water_net_energy
+        if not np.isfinite(Q_cons_adjusted) or Q_cons_adjusted == 0:
+            return np.nan
+
+        return Q_load / Q_cons_adjusted
+
+        # ---- Whole-dataset UEF ----
+    df_all = df.copy()
+
+    # If index is already named 'Time', use it directly.
+    if df_all.index.name == "Time":
+        df_all = df_all.reset_index()
+    else:
+        df_all["Time"] = df_all.index
+
+    df_all["Time"] = _parse_time(df_all["Time"])
+    df_all = df_all.dropna(subset=["Time"])
+    df_all = df_all.sort_values("Time")
+
+    uef_all = _compute_uef_for_df(df_all)
+
+    # ---- Last calendar day UEF ----
+    if df_all.empty:
+        uef_last_day = np.nan
+    else:
+        last_day = df_all['Time'].max().normalize()  # calendar day of the last timestamp
+        df_last_day = df_all[df_all['Time'].dt.normalize() == last_day]
+        # Recompute on the sliced day to get correct dt_s within the day
+        uef_last_day = _compute_uef_for_df(df_last_day)
+
+    return {"uef_all": uef_all, "uef_last_day": uef_last_day}
 
 def run_water_heater_electric(default_args, setpoint_temp, tank_volume):
     # Create water draw schedule
@@ -694,14 +767,16 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
         "HPWH COP (-)": 4.2, #adjusted from bigladder
         "duration": duration,
         **default_args,
-        # "time_res": dt.timedelta(minutes=1),
-        "time_res": dt.timedelta(seconds=0.5),
-        "hp_only_mode": True
+        "time_res": dt.timedelta(minutes=1),
+        # "time_res": dt.timedelta(seconds=0.5),
+        "hp_only_mode": True,
+        "schedule": schedule
     }
 
     deadband_default = schedule['Water Heating Deadband (C)'].iloc[0]
     # Initialize equipment
-    hpwh = HeatPumpWaterHeater(schedule=schedule, **equipment_args)
+    hpwh = HeatPumpWaterHeater(**equipment_args)
+    hpwh.schedule = schedule
 
     if default_args.get('schedule_input_file', None) is None:
         hot_water_output_gallons, hpwh = simulate_first_hour_test(hpwh, enable_first_hour_test=True, disable_heating_during_draw=False, first_hour_duration=60, draw_rate_gpm=3, allow_setpoint_start=False, hot_water_temp_f=110, setpoint_temp_f=140)
@@ -710,7 +785,7 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
 
     df = hpwh.finalize()
     
-    uef = calculate_uef(df, equipment_args['Tank Volume (L)'])
+    uef = calculate_uef(df, default_args['name'])
     
     return uef
 
@@ -939,7 +1014,7 @@ if __name__ == "__main__":
                                             model_name = convert_dict_to_name(pcm_vol_fraction)
 
                                             # model_name = f"Heatpump_thickness-{external_pcm_thickness_in:.2f}_segment_thickness-{pcm_segment_thickness_inches:.2f}_water_side_film_h-{film_h:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
-                                            model_name = f"Adjusted_water_beta_z_Heatpump_thickness-{external_pcm_thickness_in:.2f}_segment_thickness-{pcm_segment_thickness_inches:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
+                                            model_name = f"Adjusted_water_beta_z_Heatpump_thickness-{external_pcm_thickness_in:.2f}_segment_thickness-{pcm_segment_thickness_inches:.2f}_film_heat_transfer_coefficient-{film_h:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
                                             i += 1
                                             current_default_args = add_pcm_model(
                                                 current_default_args,
@@ -991,7 +1066,7 @@ if __name__ == "__main__":
         print(
             f"{GREEN}{process}: simulation time = {data['sim_time']:.2f} sec, "
             f"wait time = {data['wait_time']:.2f} sec, total = {data['total_task_time']:.2f} sec, "
-            f"UEF: {data['uef']:.6f}{RESET}"
+            f"UEF: {data['uef']}{RESET}"
         )
 
     # --- Calculate and print overall overhead statistics ---

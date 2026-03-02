@@ -3837,7 +3837,7 @@ if __name__ == "__main__":
     # print(f"Hot water plot time: {time.perf_counter() - _hot_water_plot_time:.2f} seconds")
     
     # csv_path = export_draw_outputs_csv(output, "../OCHRE_results/results_csv/results_no_FHR_ADJUSTMENT.csv")
-    csv_path = export_draw_outputs_csv(output, "../OCHRE_results/results_csv/results_FHR_ADJUSTMENT_PCM_PARMETRIC_LOW_CONDUCTIVITY.csv")
+    csv_path = export_draw_outputs_csv(output, uef_totals, "../OCHRE_results/results_csv/results_FHR_ADJUSTMENT_PCM_PARMETRIC_LOW_CONDUCTIVITY.csv")
     
     # plot_draw_events(output)
     # plot_totals(output)
