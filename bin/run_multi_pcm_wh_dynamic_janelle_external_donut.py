@@ -38,25 +38,25 @@ end_node = 9
 DEFAULT_PCM_PROPERTIES = {
     "t_m1": 50,  # C
     "t_m2": 55,  # C
-    "h_fus": 226,  # J/g
+    "h_fus": 180,  # J/g
     "h": 600,  # W/m^2K
     "sa_ratio": 15,  # m^2/m^3 of total pcm volume
     "h_conv": 100,  # W/K, accounts for surface area (ha)
-    "setpoint_temp": 50,  # C
+    "setpoint_temp": 51.67,  # C
     "solid": {
-        "pcm_density": 0.991,  # g/cm**3 10% graphite 90% pcm
-        "pcm_cp": 0.6,  # J/g-C # adjusted by real measurements average from 0-45c
+        "pcm_density": 1.106,  # g/cm**3 10% graphite 90% pcm
+        "pcm_cp": 1.722,  # J/g-C # adjusted by real measurements average from 0-45c
         # "pcm_conductivity": 0.28,  # W/m-C, not used Bulk PCM conductivity
         "pcm_conductivity": 10,  # W/m-C, not used graphite infiltrated PCM conductivity
         # "pcm_c": 1717.6,  # J/m**3-C, not used
     },
     "liquid": {
-        "pcm_density": 0.829,  # g/cm**3
-        "pcm_cp": 1.33,  # J/g-C # adjusted by real measurements average from 55-100c
-        "pcm_conductivity": 0.16,  # W/m-C, not used
+        "pcm_density": 1.042,  # g/cm**3
+        "pcm_cp": 1.977,  # J/g-C # adjusted by real measurements average from 55-100c
+        "pcm_conductivity": 10,  # W/m-C, not used
         # "pcm_c": 1823.8,  # J/m**3-C, not used
     },
-    "enthalpy_lut": "90-cp_h-T_data_shifted_120F.csv",
+    "enthalpy_lut": "85wt-pt60-EG_h-T_data_48C.csv",
     "film_h": 50,
     "external_pcm_thickness_in": 1,
     "pcm_segment_thickness_inches": 1
@@ -76,12 +76,12 @@ h_values = [1000]
 simulation_duration_days = 220
 
 # pcm_file_names = ['cp_h-T_data_shifted_120F.csv']
-pcm_file_names = ['cp_h-T_data_52_6C.csv']
+pcm_file_names = ['85wt-pt60-EG_h-T_data_53C.csv']
 
 # pcm_file_names = [f'90%_cp_h-T_data_shifted_{i}F.csv' for i in range(110, 142, 1)]
 
 # setpoint_temps_f = [140]
-setpoint_temps_f = [140]
+setpoint_temps_f = [125]
 setpoint_temps_c = [
     (setpoint_temp - 32) * (5 / 9) for setpoint_temp in setpoint_temps_f
 ]
@@ -91,10 +91,10 @@ setpoint_temps_c = [
 # films_h = np.logspace(np.log10(50), np.log10(1000), 11)
 # pcms_thickness_in = np.linspace(0.1, 1.25, 11)
 
-films_h = [50,150]
+films_h = [150]
 # pcms_thickness_in = [0.001,0.1,0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
-pcms_thickness_in = [1]
-pcms_segment_thickness_inches = [1]
+pcms_thickness_in = [0.28, 0.51, 0.74, 0.97, 1.2]
+pcms_segment_thickness_inches = [0.17]
 # pcms_segment_thickness_inches = [1.2]
 
 # tank_volume_gal = [40,50, 65]
@@ -126,8 +126,8 @@ for vol_fract in vol_fracs:
 # load_profile = "2.00gpm30min_0gpm180min_cycling.csv"
 # load_profile = "2.00gpm30min_0gpm600min_cycling.csv"
 # load_profile = "2.00gpm120min_0gpm600min_cycling.csv"
-# load_profile = "MediumUseL.csv"
-load_profile = "MediumUseL_single_column.csv"
+# load_profile = "MediumUseL.csv"                     #<--- UEF
+load_profile = "MediumUseL_single_column.csv"      #<--- FHR
 # load_profile = "2.00gpm_1200minStartIdle_2cycles_30minDraw_240minOff_0minEndIdle.csv"
 # load_profile = "2.00gpm_1200minStartIdle_ 2cycles_30minDraw_240minOff_0minEndIdle_Single_draw.csv"
 # load_profiles = ["MediumUseL.csv", "2.00gpm30min_0gpm600min_cycling.csv"]
@@ -172,7 +172,7 @@ default_args = {
     "save_results": None,  # if True, must specify output_path # None Merges the simulator results into 1 file
     "output_path": '../OCHRE_output/OCHRE_results/results/',
     "name": "ZDefault_ElectricResistanceWaterHeater",
-    "schedule_input_file": load_profile,
+    "schedule_input_file": load_profile,                #<--- enable for UEF test
 }
 
 def import_water_heating_schedule(schedule_file):

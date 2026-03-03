@@ -531,7 +531,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         self.enthalpy_lut = _load_enthalpy_lut(pcm_file)
 
         # Fallback for water‑side film‑coefficient
-        self.pcm_thickness_in = self.pcm_properties.get("pcm_thickness_inches", pcm_thickness_in)
+        self.pcm_thickness_in = self.pcm_properties.get("external_pcm_thickness_in", pcm_thickness_in)
         self.pcm_segment_thickness_inches = self.pcm_properties.get("pcm_segment_thickness_inches", pcm_segment_thickness_in)
         self.external_nodes = ["AMB"]
 
