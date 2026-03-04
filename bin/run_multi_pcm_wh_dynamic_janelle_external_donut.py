@@ -76,7 +76,7 @@ h_values = [1000]
 simulation_duration_days = 220
 
 # pcm_file_names = ['cp_h-T_data_shifted_120F.csv']
-pcm_file_names = ['85wt-pt60-EG_h-T_data_53C.csv']
+pcm_file_names = ['85wt-pt60-EG_h-T_data_48C.csv']
 
 # pcm_file_names = [f'90%_cp_h-T_data_shifted_{i}F.csv' for i in range(110, 142, 1)]
 
@@ -172,7 +172,7 @@ default_args = {
     "save_results": None,  # if True, must specify output_path # None Merges the simulator results into 1 file
     "output_path": '../OCHRE_output/OCHRE_results/results/',
     "name": "ZDefault_ElectricResistanceWaterHeater",
-    "schedule_input_file": load_profile,                #<--- enable for UEF test
+    # "schedule_input_file": load_profile,                #<--- enable for UEF test
 }
 
 def import_water_heating_schedule(schedule_file):
@@ -767,8 +767,8 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
         "HPWH COP (-)": 4.2, #adjusted from bigladder
         "duration": duration,
         **default_args,
-        "time_res": dt.timedelta(minutes=1),
-        # "time_res": dt.timedelta(seconds=0.5),
+        # "time_res": dt.timedelta(minutes=1),
+        "time_res": dt.timedelta(seconds=0.5),
         "hp_only_mode": True,
         "schedule": schedule
     }

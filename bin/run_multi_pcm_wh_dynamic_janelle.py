@@ -39,8 +39,8 @@ DEFAULT_PCM_PROPERTIES = {
     "sa_ratio": 15, # m^2/m^3 of total pcm heat exchanger volume
     "h_conv": 100,  # W/m^2-K, accounts for surface area (ha)
     "solid": {
-        "pcm_density": 0.904,  # g/cm^3
-        "pcm_cp": 0.6,  # J/g-C # adjusted by real measurements average from 0-45c
+        "pcm_density": 0.908,  # g/cm^3
+        "pcm_cp": 1.95,  # J/g-C # adjusted by real measurements average from 0-45c
         "pcm_conductivity":0.2,  # W/m-C
     },
     "enthalpy_lut_file": "cp_h-T_data_shifted_120F.csv",
@@ -48,8 +48,8 @@ DEFAULT_PCM_PROPERTIES = {
 
 num_points = 10
 
-sa_ratios = [6.44]
-h_values = [5000]
+sa_ratios = [3, 4, 5, 6, 7]
+h_values = [2000]
 # 700 — 2200 in^2 for the MEPCM 66% vol fraction fill
 # sa_ratios = [0.673573, 0.817910, 0.962247, 1.106584, 1.250921, 1.395258, 1.539595, 1.683932, 1.828269, 1.972606, 2.116943]
 # 200-2000 in^2 for the backfilled 74% vol fraction fill
@@ -93,7 +93,8 @@ simulation_duration_days = 220
 # pcm_file_names = ['ct53_h-T_data_58frac.csv']W
 # pcm_file_names = ['ct53_h-T_data_57frac.csv']
 
-pcm_file_names = ['ct53-resin_h-T_data_88frac.csv']
+# pcm_file_names = ['ct53-resin_h-T_data_88frac.csv']
+pcm_file_names = ['ct53-resin_h-T_data_81frac_48C.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_85frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_83frac.csv']
 # pcm_file_names = [f'100%_ct53-resin_h-T_data_88frac_{x}F.csv' for x in range (110, 142 + 1, 1)]
@@ -104,7 +105,7 @@ pcm_file_names = ['ct53-resin_h-T_data_88frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_45frac.csv']
 
 # setpoint_temps_f = [140]
-setpoint_temps_f = [140]
+setpoint_temps_f = [125]
 setpoint_temps_c = [
     (setpoint_temp - 32) * (5 / 9) for setpoint_temp in setpoint_temps_f
 ]
@@ -121,7 +122,7 @@ tank_volume_gal = [40]
 # vol_fracs = [0.66]
 # vol_fracs = [0.74]
 # vol_fracs = [0.26]
-vol_fracs = [0.74]
+vol_fracs = [0.62]
 
 # pcm_vol_fractions = [{i: vol_fract for i in range(1, n + 1)} for n in range(1, num_nodes + 1)]
 # pcm_vol_fractions = [
@@ -799,7 +800,7 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
 
     df = hpwh.finalize()
     
-    uef = calculate_uef(df, equipment_args['Tank Volume (L)'])
+    uef = calculate_uef(df, equipment_args['name'])
     
     return uef
 
