@@ -316,12 +316,12 @@ DEFAULT_SCENARIO = {
 }
 
 DEFAULT_TESTS = [
-    # {
-    #     "test_type": "FHR",
-    #     "duration_hours": 48,
-    #     "time_interval_seconds": 0.5,
-    #     "load_profile": None,
-    # },
+    {
+        "test_type": "FHR",
+        "duration_hours": 48,
+        "time_interval_seconds": 0.5,
+        "load_profile": None,
+    },
     {
             "test_type": "UEF",
             "duration_hours": 48,
@@ -341,7 +341,7 @@ DEFAULT_RUNNER_CONFIG = {
     "processes": None,
     "image_scale": 4,
     "baseline_file": "../OCHRE_output/zDefault_No_PCM_HeatPump_setpoint-140F_40gal_0.csv",
-    "export_draw_outputs": False,
+    "export_draw_outputs": True,
     "draw_outputs_csv": "../OCHRE_output/OCHRE_results/results_csv/results.csv",
     "tests": DEFAULT_TESTS,
     "scenarios": [DEFAULT_SCENARIO],
