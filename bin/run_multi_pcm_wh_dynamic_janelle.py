@@ -1,8 +1,12 @@
 import datetime as dt
+import argparse
+import json
 import numpy as np
 import pandas as pd
 import os
 import shutil
+import tempfile
+from pathlib import Path
 
 from ochre import (
     HeatPumpWaterHeater,
@@ -11,11 +15,16 @@ from ochre import (
 )
 from ochre.Models import TankWithMultiPCM
 from ochre.utils import convert
+from bin.calculate_hot_water_delivered import calculate_hot_water_delivered_from_paths
+from bin.create_output_csv import export_draw_outputs_csv
 import time
 from bin.run_dwelling import dwelling_args
 import multiprocessing
 import copy
 import re
+
+
+RUNNER_ROOT = Path(__file__).resolve().parent.parent
 
 # ANSI Terminal color codes
 RESET = "\033[0m"
@@ -24,6 +33,105 @@ GREEN = "\033[92m"
 CYAN = "\033[96m"
 YELLOW = "\033[93m"
 RED = "\033[91m"
+
+
+def _format_progress_duration(seconds):
+    """Format elapsed or estimated time as HH:MM:SS."""
+    total_seconds = max(0, int(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _progress_bar(completed, total, width=24):
+    """Return a compact ASCII progress bar."""
+    if total <= 0:
+        ratio = 1.0
+    else:
+        ratio = min(1.0, max(0.0, completed / total))
+    filled = int(ratio * width)
+    return f"[{'#' * filled}{'-' * (width - filled)}]"
+
+
+class ProgressBars:
+    """Track current-scenario and all-scenarios simulation progress."""
+
+    def __init__(self, total_cases):
+        self.total_cases = max(0, int(total_cases))
+        self.global_completed = 0
+        self.global_started = time.perf_counter()
+        self.case_name = None
+        self.case_total = 0
+        self.case_completed = 0
+        self.case_started = None
+        self.last_case_report = 0
+        self.last_global_report = 0
+
+    @staticmethod
+    def _line(label, completed, total, started):
+        elapsed = time.perf_counter() - started
+        if completed > 0:
+            eta_seconds = elapsed / completed * max(0, total - completed)
+            eta = _format_progress_duration(eta_seconds)
+        else:
+            eta = "--:--:--"
+        percent = 100.0 if total <= 0 else min(100.0, completed / total * 100)
+        return (
+            f"{label:<18} {_progress_bar(completed, total)} "
+            f"{completed:>5}/{total:<5} ({percent:5.1f}%) "
+            f"elapsed {_format_progress_duration(elapsed)} ETA {eta}"
+        )
+
+    def start_case(self, case_name, total_cases):
+        self.case_name = str(case_name)
+        self.case_total = max(0, int(total_cases))
+        self.case_completed = 0
+        self.case_started = time.perf_counter()
+        self.last_case_report = 0
+        self.render(force=True)
+
+    def advance(self, count=1, force=False):
+        if self.case_name is None:
+            return
+        self.case_completed = min(self.case_total, self.case_completed + count)
+        self.global_completed = min(
+            self.total_cases, self.global_completed + count
+        )
+        self.render(force=force)
+
+    def render(self, force=False):
+        if self.case_name is None or self.case_started is None:
+            return
+        case_step = max(1, self.case_total // 20)
+        global_step = max(1, self.total_cases // 100)
+        should_report = (
+            force
+            or self.case_completed == self.case_total
+            or self.global_completed == self.total_cases
+            or self.case_completed - self.last_case_report >= case_step
+            or self.global_completed - self.last_global_report >= global_step
+        )
+        if not should_report:
+            return
+
+        print(
+            self._line(
+                f"Case {self.case_name}",
+                self.case_completed,
+                self.case_total,
+                self.case_started,
+            )
+        )
+        print(
+            self._line(
+                "Global total",
+                self.global_completed,
+                self.total_cases,
+                self.global_started,
+            )
+        )
+        self.last_case_report = self.case_completed
+        self.last_global_report = self.global_completed
 
 
 
@@ -48,7 +156,7 @@ DEFAULT_PCM_PROPERTIES = {
 
 num_points = 10
 
-sa_ratios = [3, 4, 5, 6, 7]
+sa_ratios = [4]
 h_values = [2000]
 # 700 — 2200 in^2 for the MEPCM 66% vol fraction fill
 # sa_ratios = [0.673573, 0.817910, 0.962247, 1.106584, 1.250921, 1.395258, 1.539595, 1.683932, 1.828269, 1.972606, 2.116943]
@@ -67,7 +175,7 @@ h_values = [2000]
 # ]
 
 # case 1 
-# sa_ratios = np.linspace(2, 30, num_points)
+# sa_ratios = [15, 87, 159, 231, 303, 375]
 
 # case 2
 # sa_ratios = np.linspace(1, 16, num_points)
@@ -79,6 +187,7 @@ h_values = [2000]
 # h_values = np.linspace(50, 5000, num_points)
 # h_values = [500]
 # h_values = np.linspace(50, 5000, 20)
+# h_values = [25, 525, 1025, 1525, 2025, 2525]
 
 # pcm_file_names = [f"cp_h-T_data_shifted_{i}F.csv" for i in range(110, 142, 2)]
 
@@ -94,7 +203,7 @@ simulation_duration_days = 220
 # pcm_file_names = ['ct53_h-T_data_57frac.csv']
 
 # pcm_file_names = ['ct53-resin_h-T_data_88frac.csv']
-pcm_file_names = ['ct53-resin_h-T_data_81frac_48C.csv']
+pcm_file_names = ['CT53_90%_cp_h_T_data.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_85frac.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_83frac.csv']
 # pcm_file_names = [f'100%_ct53-resin_h-T_data_88frac_{x}F.csv' for x in range (110, 142 + 1, 1)]
@@ -105,7 +214,7 @@ pcm_file_names = ['ct53-resin_h-T_data_81frac_48C.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_45frac.csv']
 
 # setpoint_temps_f = [140]
-setpoint_temps_f = [125]
+setpoint_temps_f = [140]
 setpoint_temps_c = [
     (setpoint_temp - 32) * (5 / 9) for setpoint_temp in setpoint_temps_f
 ]
@@ -113,7 +222,7 @@ setpoint_temps_c = [
 case_run_name = "case01"
 
 # tank_volume_gal = [40,50, 65]
-tank_volume_gal = [40]
+tank_volume_gal = [40,50]
 
 
 # vol_fract = 0.00000001  # 1.540e-06 kg
@@ -122,7 +231,7 @@ tank_volume_gal = [40]
 # vol_fracs = [0.66]
 # vol_fracs = [0.74]
 # vol_fracs = [0.26]
-vol_fracs = [0.62]
+vol_fracs = [0.13]
 
 # pcm_vol_fractions = [{i: vol_fract for i in range(1, n + 1)} for n in range(1, num_nodes + 1)]
 # pcm_vol_fractions = [
@@ -189,48 +298,411 @@ default_args = {
     # "schedule_input_file": load_profile,
 }
 
-def import_water_heating_schedule(schedule_file):
-    """
-    Reads in a one-column CSV (which may or may not have a header row).
-    If the first row is non-numeric, treat it as a header and drop it from the data.
-    Otherwise, treat all rows as data and assign a default column name of 0.
-    Finally, clip to 220*1440 rows, reset_index, and return that DataFrame.
-    """
-    try:
-        # 1) Read everything as data, no header inference
-        raw = pd.read_csv(f"ochre/defaults/Input Files/{schedule_file}", header=None)
 
-        # 2) Peek at the very first cell of raw
-        first_val = raw.iloc[0, 0]
+DEFAULT_SCENARIO = {
+    "name": case_run_name,
+    "nodes": list(range(start_node, end_node + 1)),
+    "sa_ratios": list(sa_ratios),
+    "h_values": list(h_values),
+    "setpoint": list(setpoint_temps_f),
+    "volume": list(tank_volume_gal),
+    "pcm_file_name": list(pcm_file_names),
+    "volume_fraction": list(vol_fracs),
+    "heater_type": "heatpump",
+    "load_profile": None,
+    "default_parameters": {},
+    "pcm_defaults": {},
+    "tests": None,
+}
 
-        # 3) Try to coerce it to float; if that fails, we assume it was meant to be a header
-        try:
-            float(first_val)
-            is_numeric = True
-        except ValueError:
-            is_numeric = False
+DEFAULT_TESTS = [
+    # {
+    #     "test_type": "FHR",
+    #     "duration_hours": 48,
+    #     "time_interval_seconds": 0.5,
+    #     "load_profile": None,
+    # },
+    {
+            "test_type": "UEF",
+            "duration_hours": 48,
+            "time_interval_seconds": 30,
+            "load_profile": "MediumUseL.csv",
+        }
+]
 
-        if not is_numeric:
-            # --- Case A: first row is a real header (string) ---
-            col_name = str(first_val)           # e.g. "withdraw_rate_lpm" or whatever text was in row 0
-            data = raw.iloc[1:].copy()          # drop row 0 from the data
-            data.columns = [col_name]           # assign that string as the column name
+
+DEFAULT_RUNNER_CONFIG = {
+    "results_root": "../OCHRE_output/OCHRE_results/scenarios",
+    "plot_output_folder": "../OCHRE_output/results",
+    "generate_plots": False,
+    "skip_showing_plots": True,
+    "run_default_no_pcm": True,
+    "default_no_pcm_type": "heatpump",
+    "processes": None,
+    "image_scale": 4,
+    "baseline_file": "../OCHRE_output/zDefault_No_PCM_HeatPump_setpoint-140F_40gal_0.csv",
+    "export_draw_outputs": False,
+    "draw_outputs_csv": "../OCHRE_output/OCHRE_results/results_csv/results.csv",
+    "tests": DEFAULT_TESTS,
+    "scenarios": [DEFAULT_SCENARIO],
+}
+
+
+def _as_list(value, field_name):
+    """Return a scalar or JSON array as a non-empty list."""
+    if value is None:
+        raise ValueError(f"Scenario field '{field_name}' is required")
+    values = value if isinstance(value, (list, tuple)) else [value]
+    if not values:
+        raise ValueError(f"Scenario field '{field_name}' cannot be empty")
+    return list(values)
+
+
+def _format_number(value):
+    return f"{float(value):.0f}"
+
+
+def _safe_folder_token(value):
+    value = str(value).replace("%", "pct")
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value)
+    return value.strip("-.") or "value"
+
+
+def _value_summary(values, suffix=""):
+    return "-".join(_safe_folder_token(_format_number(value)) for value in values) + suffix
+
+
+def _merge_dicts(base, overrides):
+    """Deep-merge JSON overrides into a copied dictionary."""
+    merged = copy.deepcopy(base)
+    for key, value in (overrides or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_dicts(merged[key], value)
         else:
-            # --- Case B: first row is just numeric data (no header in file) ---
-            data = raw.copy()
-            data = data[0]           
+            merged[key] = copy.deepcopy(value)
+    return merged
 
-        # 4) Clip to day_minutes
-        day_minutes = simulation_duration_days * 1440               # as before
-        hot_water_schedule = data.iloc[:day_minutes]
 
-    except Exception as e:
-        print(f"Error importing water heating schedule file: {e}")
-        hot_water_schedule = pd.DataFrame(columns=[0])  # return an empty frame on failure
+def normalize_test_config(raw_test):
+    """Normalize one configured water-heater test definition."""
+    if isinstance(raw_test, str):
+        raw_test = {"test_type": raw_test}
+    if not isinstance(raw_test, dict):
+        raise ValueError("Each entry in 'tests' must be a string or JSON object")
+
+    test_type = str(raw_test.get("test_type", raw_test.get("name", ""))).upper()
+    if test_type not in {"FHR", "UEF"}:
+        raise ValueError("Test type must be 'FHR' or 'UEF'")
+
+    defaults = {
+        "FHR": {
+            "duration_hours": 48,
+            "time_interval_seconds": 0.5,
+            "load_profile": None,
+        },
+        "UEF": {
+            "duration_hours": 48,
+            "time_interval_seconds": 30,
+            "load_profile": "MediumUseL.csv",
+        },
+    }[test_type]
+    duration_hours = float(raw_test.get("duration_hours", defaults["duration_hours"]))
+    time_interval_seconds = float(
+        raw_test.get("time_interval_seconds", defaults["time_interval_seconds"])
+    )
+    load_profile_for_test = raw_test.get("load_profile", defaults["load_profile"])
+
+    if duration_hours <= 0:
+        raise ValueError(f"{test_type} duration_hours must be positive")
+    if time_interval_seconds <= 0:
+        raise ValueError(f"{test_type} time_interval_seconds must be positive")
+    if test_type == "UEF" and not load_profile_for_test:
+        raise ValueError("UEF test requires a load_profile")
+
+    return {
+        "test_type": test_type,
+        "duration_hours": duration_hours,
+        "time_interval_seconds": time_interval_seconds,
+        "load_profile": load_profile_for_test,
+    }
+
+
+def normalize_test_configs(raw_tests):
+    tests = [normalize_test_config(test) for test in _as_list(raw_tests, "tests")]
+    test_types = [test["test_type"] for test in tests]
+    if len(test_types) != len(set(test_types)):
+        raise ValueError("Configured test types must be unique")
+    return tests
+
+
+def normalize_scenario(raw_scenario):
+    """Normalize and validate one JSON scenario into runner-ready values."""
+    if not isinstance(raw_scenario, dict):
+        raise ValueError("Each entry in 'scenarios' must be a JSON object")
+
+    raw = _merge_dicts(DEFAULT_SCENARIO, raw_scenario)
+    name = str(raw.get("name", "")).strip()
+    if not name:
+        raise ValueError("Each scenario must have a non-empty 'name'")
+
+    nodes = [int(node) for node in _as_list(raw["nodes"], "nodes")]
+    if any(node < 0 for node in nodes):
+        raise ValueError(f"Scenario '{name}' has a negative PCM node")
+
+    sa_values = [float(value) for value in _as_list(raw["sa_ratios"], "sa_ratios")]
+    h_values_for_scenario = [float(value) for value in _as_list(raw["h_values"], "h_values")]
+    setpoints_f = [float(value) for value in _as_list(raw["setpoint"], "setpoint")]
+    volumes_gal = [float(value) for value in _as_list(raw["volume"], "volume")]
+    pcm_names = [str(value) for value in _as_list(raw["pcm_file_name"], "pcm_file_name")]
+    volume_fractions = [
+        float(value) for value in _as_list(raw["volume_fraction"], "volume_fraction")
+    ]
+
+    if any(value <= 0 for value in sa_values):
+        raise ValueError(f"Scenario '{name}' must use positive sa_ratios")
+    if any(value <= 0 for value in h_values_for_scenario):
+        raise ValueError(f"Scenario '{name}' must use positive h_values")
+    if any(value <= 0 for value in volumes_gal):
+        raise ValueError(f"Scenario '{name}' must use positive tank volumes")
+    if any(value < 0 or value > 1 for value in volume_fractions):
+        raise ValueError(
+            f"Scenario '{name}' volume_fraction values must be between 0 and 1"
+        )
+    if any(not value.strip() for value in pcm_names):
+        raise ValueError(f"Scenario '{name}' contains an empty pcm_file_name")
+
+    heater_type = str(raw.get("heater_type", "heatpump")).lower()
+    if heater_type not in {"heatpump", "electric"}:
+        raise ValueError(
+            f"Scenario '{name}' heater_type must be 'heatpump' or 'electric'"
+        )
+
+    return {
+        "name": name,
+        "nodes": nodes,
+        "sa_ratios": sa_values,
+        "h_values": h_values_for_scenario,
+        "setpoints_f": setpoints_f,
+        "volumes_gal": volumes_gal,
+        "pcm_file_names": pcm_names,
+        "volume_fractions": volume_fractions,
+        "heater_type": heater_type,
+        "load_profile": raw.get("load_profile"),
+        "default_parameters": raw.get("default_parameters", {}),
+        "pcm_defaults": raw.get("pcm_defaults", {}),
+        "baseline_file": raw.get("baseline_file"),
+        "run_default_no_pcm": raw.get("run_default_no_pcm"),
+        "default_no_pcm_type": raw.get("default_no_pcm_type"),
+        "folder_name": raw.get("folder_name"),
+        "tests": (
+            normalize_test_configs(raw["tests"])
+            if raw.get("tests") is not None
+            else None
+        ),
+    }
+
+
+def load_runner_config(config_path=None):
+    """Load the runner JSON, or return the current script defaults."""
+    configured_scenarios = None
+    if config_path is None:
+        config = copy.deepcopy(DEFAULT_RUNNER_CONFIG)
+        config_base = RUNNER_ROOT
+    else:
+        config_path = Path(config_path).expanduser().resolve()
+        with config_path.open("r", encoding="utf-8") as config_file:
+            loaded = json.load(config_file)
+        if isinstance(loaded, list):
+            loaded = {"scenarios": loaded}
+        if not isinstance(loaded, dict):
+            raise ValueError("Runner config must be a JSON object or scenario array")
+        config = _merge_dicts(DEFAULT_RUNNER_CONFIG, loaded)
+        configured_scenarios = loaded.get("scenarios", loaded.get("cases"))
+        config_base = RUNNER_ROOT
+
+    scenario_entries = (
+        configured_scenarios
+        if configured_scenarios is not None
+        else config.get("scenarios", config.get("cases"))
+    )
+    if not scenario_entries:
+        raise ValueError("Runner config must contain at least one scenario")
+    config["tests"] = normalize_test_configs(config.get("tests", DEFAULT_TESTS))
+    config["scenarios"] = [normalize_scenario(entry) for entry in scenario_entries]
+    scenario_names = [scenario["name"] for scenario in config["scenarios"]]
+    if len(scenario_names) != len(set(scenario_names)):
+        raise ValueError("Scenario names must be unique")
+    config["config_base"] = config_base
+    return config
+
+
+def resolve_runner_path(value, base_dir):
+    if value is None:
+        return None
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+
+    # All relative runner paths are rooted at the repository directory, not
+    # at bin/ or whichever directory the command happened to be launched from.
+    return (Path(base_dir) / path).resolve()
+
+
+def scenario_folder_name(scenario):
+    """Create a readable, filesystem-safe summary folder name."""
+    pcm_summary = "-".join(_safe_folder_token(Path(name).stem) for name in scenario["pcm_file_names"])
+    volume_fraction_summary = "-".join(
+        _safe_folder_token(_format_number(value * 100))
+        for value in scenario["volume_fractions"]
+    )
+    return "__".join(
+        [
+            _safe_folder_token(scenario["folder_name"] or scenario["name"]),
+            f"nodes{_value_summary(scenario['nodes'])}",
+            f"sa{_value_summary(scenario['sa_ratios'])}",
+            f"h{_value_summary(scenario['h_values'])}",
+            f"sp{_value_summary(scenario['setpoints_f'], 'F')}",
+            f"vol{_value_summary(scenario['volumes_gal'], 'gal')}",
+            f"pcm-{pcm_summary}",
+            f"vf{volume_fraction_summary}pct",
+        ]
+    )
+
+
+SCENARIO_CACHE_VERSION = 2
+SCENARIO_CACHE_FILE = ".scenario_cache.json"
+
+
+def scenario_cache_payload(scenario, run_default_no_pcm, no_pcm_type, tests=None):
+    """Return the decoded scenario configuration used to identify its cache."""
+    return {
+        "cache_version": SCENARIO_CACHE_VERSION,
+        "scenario": copy.deepcopy(scenario),
+        "run_default_no_pcm": bool(run_default_no_pcm),
+        "default_no_pcm_type": str(no_pcm_type).lower(),
+        "tests": copy.deepcopy(tests or scenario.get("tests") or DEFAULT_TESTS),
+    }
+
+
+def _cache_identity_matches(scenario_folder, cache_payload):
+    """Check the stored JSON identity when this folder has one.
+
+    Existing result folders from before the cache metadata was added are still
+    eligible for reuse when their exact expected result files are present.
+    """
+    cache_path = scenario_folder / SCENARIO_CACHE_FILE
+    if not cache_path.is_file():
+        return True
+
+    try:
+        with cache_path.open("r", encoding="utf-8") as cache_file:
+            stored_payload = json.load(cache_file)
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    return stored_payload == cache_payload
+
+
+def _write_scenario_cache(scenario_folder, cache_payload):
+    """Atomically record a completed scenario's decoded configuration."""
+    cache_path = scenario_folder / SCENARIO_CACHE_FILE
+    temporary_path = scenario_folder / f"{SCENARIO_CACHE_FILE}.{os.getpid()}.tmp"
+    try:
+        with temporary_path.open("w", encoding="utf-8") as cache_file:
+            json.dump(cache_payload, cache_file, indent=2, sort_keys=True)
+            cache_file.write("\n")
+        os.replace(temporary_path, cache_path)
     finally:
-        print(os.getcwd())
+        if temporary_path.exists():
+            temporary_path.unlink()
 
+
+def _task_result_is_complete(task):
+    """Return whether a task has a non-empty result and OCHRE completion mark."""
+    result_path = task["result_path"]
+    complete_path = task["complete_path"]
+    return (
+        result_path.is_file()
+        and result_path.stat().st_size > 0
+        and complete_path.is_file()
+    )
+
+
+def cached_scenario_tasks(tasks, scenario_folder, cache_payload):
+    """Return tasks reusable from this scenario folder.
+
+    A mismatched cache identity invalidates the whole folder. With no metadata
+    file, exact task result paths provide backward-compatible cache discovery.
+    """
+    if not _cache_identity_matches(scenario_folder, cache_payload):
+        return []
+    return [task for task in tasks if _task_result_is_complete(task)]
+
+
+def scenario_results_are_complete(tasks):
+    """Return whether every expected task result is present and complete."""
+    return bool(tasks) and all(_task_result_is_complete(task) for task in tasks)
+
+
+def import_water_heating_schedule(schedule_file, duration):
+    """Load the requested water-use columns for the configured duration."""
+    schedule_path = Path(schedule_file).expanduser()
+    if not schedule_path.is_absolute():
+        input_file_path = RUNNER_ROOT / "ochre" / "defaults" / "Input Files" / schedule_path
+        runner_path = RUNNER_ROOT / schedule_path
+        schedule_path = input_file_path if input_file_path.is_file() else runner_path
+    schedule_path = schedule_path.resolve()
+    if not schedule_path.is_file():
+        raise FileNotFoundError(f"Water-heating load profile not found: {schedule_path}")
+
+    raw = pd.read_csv(schedule_path)
+    water_column_names = {
+        "hot_water_fixtures": "Water Fixtures (L/min)",
+        "hot_water_clothes_washer": "Clothes Washer (L/min)",
+        "hot_water_dishwasher": "Dishwasher (L/min)",
+    }
+    available_columns = [column for column in water_column_names if column in raw.columns]
+    if available_columns:
+        hot_water_schedule = raw.loc[:, available_columns].rename(columns=water_column_names)
+    elif len(raw.columns) == 1:
+        # Support legacy single-column profiles with either a header or raw values.
+        hot_water_schedule = raw.copy()
+        hot_water_schedule.columns = ["Water Fixtures (L/min)"]
+    else:
+        raise ValueError(
+            f"Load profile {schedule_path} has no supported hot_water_* columns"
+        )
+
+    hot_water_schedule = hot_water_schedule.apply(pd.to_numeric, errors="coerce").fillna(0)
+    required_minutes = int(np.ceil(duration.total_seconds() / 60))
+    if len(hot_water_schedule) < required_minutes:
+        raise ValueError(
+            f"Load profile {schedule_path} has {len(hot_water_schedule)} minute(s), "
+            f"but the configured test requires {required_minutes}"
+        )
+    hot_water_schedule = hot_water_schedule.iloc[:required_minutes].copy()
+    hot_water_schedule.index = pd.date_range(
+        default_args["start_time"], periods=len(hot_water_schedule), freq="1min"
+    )
     return hot_water_schedule
+
+
+def create_profile_water_schedule(hot_water_schedule, setpoint_temp):
+    """Add UEF water-use columns to the common water-heater schedule."""
+    fixtures = hot_water_schedule.get(
+        "Water Fixtures (L/min)",
+        pd.Series(0.0, index=hot_water_schedule.index),
+    )
+    schedule = create_water_schedule(
+        withdraw_rate_lpm=fixtures,
+        setpoint_default=setpoint_temp,
+        no_heating_during_draw=False,
+        times=hot_water_schedule.index,
+    )
+    for column in ("Clothes Washer (L/min)", "Dishwasher (L/min)"):
+        if column in hot_water_schedule:
+            schedule[column] = hot_water_schedule[column]
+    return schedule
         
     
 def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_during_draw=False, first_hour_duration=60, draw_rate_gpm=3, allow_setpoint_start=False, hot_water_temp_f=110, setpoint_temp_f=140):
@@ -288,7 +760,7 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
                     }
                     if disable_heating_during_draw:
                         control_signal['Water Heating Setpoint (C)'] = 5
-                    print(f"[{t}] ({pcm_label()})  → FIRST-HOUR test STARTED, drawing {draw_rate_gpm} gpm")
+                    print(f"[{t}] ({pcm_label()})  -> FIRST-HOUR test STARTED, drawing {draw_rate_gpm} gpm")
 
             elif test_active:
                 test_timer -= delta_min
@@ -296,7 +768,7 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
                 if wh.mode == 'Off' and not draw_active:
                     draw_active = True
                     # control_signal will be set in accumulation step if draw_active remains true
-                    print(f"[{t}] ({pcm_label()}) → MODE=Off, RESTARTING draw")
+                    print(f"[{t}] ({pcm_label()}) -> MODE=Off, RESTARTING draw")
 
                 # Check if we've reached the test duration and should trigger final draw
                 if test_timer <= 0 and not final_draw_triggered:
@@ -304,19 +776,19 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
                     # If not already drawing, start the draw
                     if not draw_active:
                         draw_active = True
-                        print(f"[{t}] ({pcm_label()}) → FINAL DRAW: Timer elapsed ({test_timer:.2f}), initiating final draw")
+                        print(f"[{t}] ({pcm_label()}) -> FINAL DRAW: Timer elapsed ({test_timer:.2f}), initiating final draw")
                     else:
-                        print(f"[{t}] ({pcm_label()}) → FINAL DRAW: Timer elapsed ({test_timer:.2f}), draw already active, continuing")
+                        print(f"[{t}] ({pcm_label()}) -> FINAL DRAW: Timer elapsed ({test_timer:.2f}), draw already active, continuing")
                 
                 if draw_active and wh.model.outlet_temp < hot_water_temp:
                     draw_active = False
                     control_signal = {} # Explicitly stop draw signal for this step
-                    print(f"[{t}] ({pcm_label()}) → temp fell ({wh.model.outlet_temp:.1f}C vs {hot_water_temp:.1f}C limit), STOPPING draw")
+                    print(f"[{t}] ({pcm_label()}) -> temp fell ({wh.model.outlet_temp:.1f}C vs {hot_water_temp:.1f}C limit), STOPPING draw")
 
                 if (allow_setpoint_start and not draw_active and wh.model.outlet_temp >= setpoint_temp):
                     draw_active = True
                     # control_signal will be set in accumulation step
-                    print(f"[{t}] ({pcm_label()}) → reached setpoint ({wh.model.outlet_temp:.1f}C), STARTING draw")
+                    print(f"[{t}] ({pcm_label()}) -> reached setpoint ({wh.model.outlet_temp:.1f}C), STARTING draw")
 
                 if draw_active:
                     control_signal['Water Fixtures (L/min)'] = draw_rate_gpm * GAL_TO_L
@@ -329,7 +801,7 @@ def simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_du
                 if test_timer <= 0 and final_draw_triggered and not draw_active:
                     test_active = False
                     test_completed = True
-                    print(f"[{t}] ({pcm_label()}) → TEST COMPLETE: delivered {total_gallons_delivered:.2f} gallons")
+                    print(f"[{t}] ({pcm_label()}) -> TEST COMPLETE: delivered {total_gallons_delivered:.2f} gallons")
                     # We don't break immediately to ensure the final state is properly updated
                     # Instead, we'll break at the end of this iteration
         
@@ -699,24 +1171,38 @@ def calculate_uef(df, name):
     return {"uef_all": uef_all, "uef_last_day": uef_last_day}
 
 
+def _simulation_test_settings(configured_args):
+    """Remove runner-only test settings before constructing OCHRE equipment."""
+    simulation_args = copy.deepcopy(configured_args)
+    test_type = str(simulation_args.pop("_test_type", "FHR")).upper()
+    duration = dt.timedelta(
+        hours=float(simulation_args.pop("_test_duration_hours", 48))
+    )
+    time_res = dt.timedelta(
+        seconds=float(simulation_args.pop("_test_time_interval_seconds", 0.5))
+    )
+    load_profile_for_test = simulation_args.pop("schedule_input_file", None)
+    return simulation_args, test_type, duration, time_res, load_profile_for_test
+
+
+def _create_test_schedule(test_type, load_profile_for_test, duration, setpoint_temp):
+    if test_type == "FHR":
+        return create_water_schedule(
+            setpoint_default=setpoint_temp,
+            withdraw_rate_gpm=0,
+            no_heating_during_draw=False,
+        )
+    if not load_profile_for_test:
+        raise ValueError(f"{test_type} test requires a water-heating load profile")
+    hot_water_schedule = import_water_heating_schedule(load_profile_for_test, duration)
+    return create_profile_water_schedule(hot_water_schedule, setpoint_temp)
+
+
 def run_water_heater_electric(default_args, setpoint_temp, tank_volume):
-    # Create water draw schedule
-
-
-    if default_args.get('schedule_input_file', None) is None:
-        schedule = create_water_schedule(setpoint_default=setpoint_temp, withdraw_rate_gpm=0, no_heating_during_draw=False)
-        duration = dt.timedelta(days=2)
-    else:
-        hot_water_schedule = import_water_heating_schedule(default_args.get('schedule_input_file'))
-        times = pd.date_range(dt.datetime(2018, 1, 1, 0, 0), dt.datetime(2018, 1, 1, 0, 0) + dt.timedelta(minutes=len(hot_water_schedule)), freq=dt.timedelta(minutes=1), inclusive="left")
-        duration = times[-1] - times[0]
-        schedule = create_water_schedule(withdraw_rate_lpm=hot_water_schedule, setpoint_default=setpoint_temp, no_heating_during_draw=False, times=times)
-        
-
-
-    hot_water_temp = convert(110, 'degF', 'degC')
-    if not duration:
-        duration = dt.timedelta(days=2)
+    simulation_args, test_type, duration, time_res, profile = _simulation_test_settings(
+        default_args
+    )
+    schedule = _create_test_schedule(test_type, profile, duration, setpoint_temp)
     equipment_args = {
         # Equipment parameters
         # "Setpoint Temperature (C)": 14.4444,
@@ -728,24 +1214,21 @@ def run_water_heater_electric(default_args, setpoint_temp, tank_volume):
         # "schedule": schedule,
         "Capacity (W)": 4500,
         "water_nodes": 12,
+        **simulation_args,
         "duration": duration,
-        **default_args,
-        # "time_res": dt.timedelta(minutes=1),
-        "time_res": dt.timedelta(seconds=0.5),
+        "time_res": time_res,
     }
 
     # Initialize equipment
     wh = ElectricResistanceWaterHeater(schedule=schedule, **equipment_args,)
 
-    # # Simulate equipment
-    if default_args.get('schedule_input_file', None) is None:
+    if test_type == "FHR":
         hot_water_output_gallons, wh = simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_during_draw=False, first_hour_duration=60, draw_rate_gpm=3, allow_setpoint_start=False, hot_water_temp_f=110, setpoint_temp_f=140)
+        df = wh.finalize()
     else:
-        wh.simulate(duration=duration)
-        
-    df = wh.finalize()
+        df = wh.simulate()
 
-    uef = calculate_uef(df, equipment_args['Tank Volume (L)'])
+    uef = calculate_uef(df, equipment_args['name'])
     
     return uef
 
@@ -754,23 +1237,10 @@ def run_water_heater_electric(default_args, setpoint_temp, tank_volume):
 
 
 def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
-    # Define equipment and simulation parameters
-    # setpoint_default = setpoint_temp  # in C
-    # deadband_default = 5.56  # in C
-    hot_water_temp = convert(110, 'degF', 'degC') 
-
-    if default_args.get('schedule_input_file', None) is None:
-        schedule = create_water_schedule(setpoint_default=setpoint_temp, withdraw_rate_gpm=0, no_heating_during_draw=False)
-        duration = dt.timedelta(days=2)
-    else:
-        hot_water_schedule = import_water_heating_schedule(default_args.get('schedule_input_file'))
-        times = pd.date_range(dt.datetime(2018, 1, 1, 0, 0), dt.datetime(2018, 1, 1, 0, 0) + dt.timedelta(minutes=len(hot_water_schedule)), freq=dt.timedelta(minutes=1), inclusive="left")
-        duration = times[-1] - times[0]
-        schedule = create_water_schedule(withdraw_rate_lpm=hot_water_schedule, setpoint_default=setpoint_temp, no_heating_during_draw=False, times=times)
-        
-        
-    if not duration:
-        duration = dt.timedelta(days=2)
+    simulation_args, test_type, duration, time_res, profile = _simulation_test_settings(
+        default_args
+    )
+    schedule = _create_test_schedule(test_type, profile, duration, setpoint_temp)
     equipment_args = {
         "verbosity": 9,  # required to get setpoint and deadband in results
         "save_results": None,  # if True, must specify output_path None Merges the simulator results into 1 file
@@ -782,10 +1252,9 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
         "UA (W/K)": 2.17,
         # "UA (W/K)": 1e-9,
         "HPWH COP (-)": 4.5,
+        **simulation_args,
         "duration": duration,
-        **default_args,
-        # "time_res": dt.timedelta(minutes=1),
-        "time_res": dt.timedelta(seconds=0.5),
+        "time_res": time_res,
         "hp_only_mode": True
     }
 
@@ -793,12 +1262,11 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
     # Initialize equipment
     hpwh = HeatPumpWaterHeater(schedule=schedule, **equipment_args)
 
-    if default_args.get('schedule_input_file', None) is None:
+    if test_type == "FHR":
         hot_water_output_gallons, hpwh = simulate_first_hour_test(hpwh, enable_first_hour_test=True, disable_heating_during_draw=False, first_hour_duration=60, draw_rate_gpm=3, allow_setpoint_start=False, hot_water_temp_f=110, setpoint_temp_f=140)
+        df = hpwh.finalize()
     else:
-        hpwh.simulate()
-
-    df = hpwh.finalize()
+        df = hpwh.simulate()
     
     uef = calculate_uef(df, equipment_args['name'])
     
@@ -866,12 +1334,15 @@ def run_water_heater_process(
     )
 
     # Run the actual simulation
+    result = None
+    simulation_error = None
     try:
         if is_heatpump:
             result = run_water_heater_heatpump(default_args, setpoint_temp, tank_volume)
         else:
             result = run_water_heater_electric(default_args, setpoint_temp, tank_volume)
     except Exception as e:
+        simulation_error = e
         print(
             f"{RED}{title}Error in simulation process run_water_heater_process: {str(e)}{RESET}"
         )
@@ -884,218 +1355,771 @@ def run_water_heater_process(
         f"total {total_duration:.2f} sec (including wait){RESET}"
     )
 
+    if simulation_error is not None:
+        raise simulation_error
+
     return title, result, sim_duration, wait_time, total_duration
 
 
+def effective_run_default_no_pcm(scenario, config):
+    """Resolve the scenario override against the runner-level default."""
+    configured = scenario["run_default_no_pcm"]
+    return config["run_default_no_pcm"] if configured is None else configured
 
-if __name__ == "__main__":
-    print(
-        f"{BOLD}{GREEN}Starting parallel execution of water heater simulations...{RESET}\n"
+
+def effective_scenario_tests(scenario, config):
+    """Resolve an optional scenario test override against config-level tests."""
+    return scenario.get("tests") or config["tests"]
+
+
+def scenario_task_count(scenario, run_default_no_pcm, tests=None):
+    """Count simulation cases generated by one normalized scenario."""
+    tests = tests or scenario.get("tests") or DEFAULT_TESTS
+    setpoint_volume_pairs = len(scenario["setpoints_f"]) * len(
+        scenario["volumes_gal"]
     )
-    _start_time = time.perf_counter()
+    pcm_grid_count = (
+        len(scenario["pcm_file_names"])
+        * len(scenario["volume_fractions"])
+        * len(scenario["sa_ratios"])
+        * len(scenario["h_values"])
+    )
+    baseline_count = int(bool(run_default_no_pcm))
+    return len(tests) * setpoint_volume_pairs * (baseline_count + pcm_grid_count)
 
-    no_pcm_electric_title_base = "zDefault_No_PCM_Electric"
-    no_pcm_heatpump_title_base = "zDefault_No_PCM_HeatPump"
-    # Create a deep copy of dwelling arguments to avoid modifying original
-    default_args_default = copy.deepcopy(default_args)
-    process_results = {}  # Dictionary to store execution times, wait times and UEF values
-    uef_values = []
 
-    # Initialize multiprocessing pool with limited number of processes to avoid resource contention
-    with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
-        # Create a list to store all async results, including the default case
-        async_results = []
+def build_scenario_tasks(
+    scenario,
+    scenario_folder,
+    run_default_no_pcm,
+    no_pcm_type,
+    tests=None,
+):
+    """Build all baseline and PCM grid-point tasks for one scenario."""
+    tests = tests or scenario.get("tests") or DEFAULT_TESTS
+    scenario_base_args = copy.deepcopy(default_args)
+    scenario_base_args.update(scenario["default_parameters"])
+    scenario_base_args["output_path"] = str(scenario_folder)
+    # Results are required by the comparison pipeline, regardless of the
+    # historical default in this script.
+    scenario_base_args["save_results"] = None
+    scenario_base_args.pop("schedule_input_file", None)
 
-        # Add the default (no PCM) case to the processing queue with submission timestamp
-        i = 0
-        for tank_volume in tank_volume_gal:
-            for setpoint_temp_c, setpoint_temp_f in zip(setpoint_temps_c, setpoint_temps_f):
-                # Electric water heater
-                # submission_time = time.perf_counter()
-                # current_default_args = copy.deepcopy(default_args_default)
-                # no_pcm_title = f"{no_pcm_electric_title_base}_setpoint-{setpoint_temp_f:.0f}F_{tank_volume}gal_{i}"
-                # current_default_args["name"] = no_pcm_title
-                # no_pcm_future_electric = pool.apply_async(
-                #     run_water_heater_process,
-                #     (
-                #         current_default_args,
-                #         tank_volume,
-                #         setpoint_temp_c,
-                #         no_pcm_title,
-                #         submission_time,
-                #     ),
-                # )
-                # async_results.append(no_pcm_future_electric)
-                # print(
-                #     f"{YELLOW}Submitted default {no_pcm_title} simulation to queue{RESET}"
-                # )
-                
-                # i += 1
-                # Heat pump water heater
-                submission_time = time.perf_counter()
-                current_default_args = copy.deepcopy(default_args_default)
-                current_default_args['is_heatpump'] = True
-                no_pcm_title = f"{no_pcm_heatpump_title_base}_setpoint-{setpoint_temp_f:.0f}F_{tank_volume}gal_{i}"
-                current_default_args["name"] = no_pcm_title
-                no_pcm_future_heatpump = pool.apply_async(
-                    run_water_heater_process,
-                    (
+    pcm_defaults = _merge_dicts(DEFAULT_PCM_PROPERTIES, scenario["pcm_defaults"])
+    tasks = []
+    case_paths_by_group = {}
+    baseline_paths_by_group = {}
+    task_index = 0
+
+    def add_task(args, tank_volume, setpoint_temp_c, filename, group, test_type):
+        tasks.append(
+            {
+                "args": args,
+                "tank_volume": tank_volume,
+                "setpoint_temp_c": setpoint_temp_c,
+                "filename": filename,
+                "group": group,
+                "test_type": test_type,
+                "result_path": scenario_folder / f"{filename}.csv",
+                "complete_path": scenario_folder / f"{filename}_complete",
+                "draw_output_path": scenario_folder / f"{filename}_draw_outputs.csv",
+            }
+        )
+
+    def apply_test_config(args, test):
+        args["_test_type"] = test["test_type"]
+        args["_test_duration_hours"] = test["duration_hours"]
+        args["_test_time_interval_seconds"] = test["time_interval_seconds"]
+        if test["load_profile"] is None:
+            args.pop("schedule_input_file", None)
+        else:
+            args["schedule_input_file"] = test["load_profile"]
+
+    for tank_volume in scenario["volumes_gal"]:
+        for setpoint_temp_f in scenario["setpoints_f"]:
+            setpoint_temp_c = convert(setpoint_temp_f, "degF", "degC")
+            group = (float(setpoint_temp_f), float(tank_volume))
+
+            for test in tests:
+                test_type = test["test_type"]
+                if run_default_no_pcm:
+                    current_default_args = copy.deepcopy(scenario_base_args)
+                    apply_test_config(current_default_args, test)
+                    current_default_args["is_heatpump"] = no_pcm_type == "heatpump"
+                    no_pcm_title_base = (
+                        "zDefault_No_PCM_HeatPump"
+                        if no_pcm_type == "heatpump"
+                        else "zDefault_No_PCM_Electric"
+                    )
+                    no_pcm_title = (
+                        f"{no_pcm_title_base}_setpoint-{setpoint_temp_f:g}F_"
+                        f"{tank_volume:g}gal_{task_index}_{test_type}"
+                    )
+                    current_default_args["name"] = no_pcm_title
+                    add_task(
                         current_default_args,
                         tank_volume,
                         setpoint_temp_c,
                         no_pcm_title,
-                        submission_time,
-                    ),
-                )
-                async_results.append(no_pcm_future_heatpump)
-                
-                i += 1
-                
-                print(
-                    f"{YELLOW}Submitted default {no_pcm_title} simulation to queue{RESET}"
-                )
+                        group,
+                        test_type,
+                    )
+                    if test_type == "FHR":
+                        baseline_paths_by_group[group] = scenario_folder / f"{no_pcm_title}.csv"
+                    task_index += 1
 
-                # Add all PCM variation tasks to the queue
-                for pcm_file_name in pcm_file_names:
-                    for pcm_vol_fraction in pcm_vol_fractions:
-                        for sa_ratio in sa_ratios:
-                            for h_value in h_values:
-                                # electric water heater
-                                # Create fresh copy of default args for each simulation
-                                # current_default_args = copy.deepcopy(default_args_default)
-                                # current_pcm_properties = copy.deepcopy(DEFAULT_PCM_PROPERTIES)
-                                # current_pcm_properties['setpoint_temp'] = setpoint_temp_c
-                                # current_pcm_properties["sa_ratio"] = sa_ratio
-                                # current_pcm_properties["h"] = h_value
-                                # current_pcm_properties['enthalpy_lut'] = pcm_file_name
-
-                                # # Add PCM model with specific volume fraction
-                                # model_name = convert_dict_to_name(pcm_vol_fraction)
-
-                                # model_name = f"{model_name}_Electric_SA-{sa_ratio:.2f}_H-{h_value:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
-                                # i += 1
-                                # current_default_args = add_pcm_model(
-                                #     current_default_args,
-                                #     model_name,
-                                #     pcm_vol_fraction,
-                                #     current_pcm_properties,
-                                # )
-
-                                # # Record submission time for this task
-                                # submission_time = time.perf_counter()
-                                # async_result = pool.apply_async(
-                                #     run_water_heater_process,
-                                #     (
-                                #         current_default_args,
-                                #         tank_volume,
-                                #         setpoint_temp_c,
-                                #         model_name,
-                                #         submission_time,
-                                #     ),
-                                # )
-                                # async_results.append(async_result)
-                                # print(
-                                #     f"{YELLOW}Submitted {model_name} simulation to queue{RESET}"
-                                # )
-                                
-                                # heat pump water heater
-                                # Create fresh copy of default args for each simulation
-                                current_default_args = copy.deepcopy(default_args_default)
-                                current_default_args['is_heatpump'] = True
-                                current_pcm_properties = copy.deepcopy(DEFAULT_PCM_PROPERTIES)
-                                current_pcm_properties['setpoint_temp'] = setpoint_temp_c
+                for pcm_file_name in scenario["pcm_file_names"]:
+                    for volume_fraction in scenario["volume_fractions"]:
+                        pcm_vol_fraction = {
+                            node: volume_fraction for node in scenario["nodes"]
+                        }
+                        for sa_ratio in scenario["sa_ratios"]:
+                            for h_value in scenario["h_values"]:
+                                current_default_args = copy.deepcopy(scenario_base_args)
+                                apply_test_config(current_default_args, test)
+                                current_default_args["is_heatpump"] = (
+                                    scenario["heater_type"] == "heatpump"
+                                )
+                                current_pcm_properties = copy.deepcopy(pcm_defaults)
+                                current_pcm_properties["setpoint_temp"] = setpoint_temp_c
                                 current_pcm_properties["sa_ratio"] = sa_ratio
                                 current_pcm_properties["h"] = h_value
-                                current_pcm_properties['enthalpy_lut_file'] = pcm_file_name
+                                current_pcm_properties["enthalpy_lut_file"] = pcm_file_name
 
-                                # Add PCM model with specific volume fraction
                                 model_name = convert_dict_to_name(pcm_vol_fraction)
-
-                                model_name = f"{case_run_name}_{model_name}_Heatpump_SA-{sa_ratio:.2f}_H-{h_value:.2f}_setpoint-{setpoint_temp_f:.0f}F_{pcm_file_name.split('.')[0]}_{tank_volume}gal_{i}"
-                                i += 1
+                                heater_label = (
+                                    "Heatpump"
+                                    if scenario["heater_type"] == "heatpump"
+                                    else "Electric"
+                                )
+                                model_name = (
+                                    f"{scenario['name']}_{model_name}_{heater_label}_"
+                                    f"SA-{_format_number(sa_ratio)}_H-{_format_number(h_value)}_"
+                                    f"setpoint-{setpoint_temp_f:g}F_"
+                                    f"{Path(pcm_file_name).stem}_{tank_volume:g}gal_"
+                                    f"{task_index}_{test_type}"
+                                )
                                 current_default_args = add_pcm_model(
                                     current_default_args,
                                     model_name,
                                     pcm_vol_fraction,
                                     current_pcm_properties,
                                 )
-
-                                # Record submission time for this task
-                                submission_time = time.perf_counter()
-                                async_result = pool.apply_async(
-                                    run_water_heater_process,
-                                    (
-                                        current_default_args,
-                                        tank_volume,
-                                        setpoint_temp_c,
-                                        model_name,
-                                        submission_time,
-                                    ),
+                                case_path = scenario_folder / f"{model_name}.csv"
+                                if test_type == "FHR":
+                                    case_paths_by_group.setdefault(group, []).append(case_path)
+                                add_task(
+                                    current_default_args,
+                                    tank_volume,
+                                    setpoint_temp_c,
+                                    model_name,
+                                    group,
+                                    test_type,
                                 )
-                                async_results.append(async_result)
-                                print(
-                                    f"{YELLOW}Submitted {model_name} simulation to queue{RESET}"
-                                )
+                                task_index += 1
 
-        # Collect results from all simulations with improved error handling
-        for async_result in async_results:
+    return tasks, case_paths_by_group, baseline_paths_by_group
+
+
+def run_scenario_tasks(tasks, processes, progress=None):
+    """Run one scenario's tasks and return successful timing/result records."""
+    process_results = {}
+    if not tasks:
+        print(f"{GREEN}No simulations to run; all task results were cached{RESET}")
+        return process_results
+
+    task_futures = []
+    process_count = processes or multiprocessing.cpu_count()
+    process_count = max(1, int(process_count))
+
+    print(
+        f"{BOLD}{GREEN}Running {len(tasks)} task(s) with {process_count} worker(s)"
+        f" for this scenario{RESET}"
+    )
+    with multiprocessing.Pool(processes=process_count) as pool:
+        for task in tasks:
+            submission_time = time.perf_counter()
+            future = pool.apply_async(
+                run_water_heater_process,
+                (
+                    task["args"],
+                    task["tank_volume"],
+                    task["setpoint_temp_c"],
+                    task["filename"],
+                    submission_time,
+                ),
+            )
+            task_futures.append((task, future))
+            print(f"{YELLOW}Submitted {task['filename']} to queue{RESET}")
+
+        for task, future in task_futures:
             try:
-                # Now we get five return values: title, result, sim_duration, wait_time, total_duration
-                title, result, sim_duration, wait_time, total_duration = (
-                    async_result.get()
-                )  # 5 minute timeout
+                title, result, sim_duration, wait_time, total_duration = future.get()
                 process_results[title] = {
                     "uef": result,
                     "sim_time": sim_duration,
                     "wait_time": wait_time,
                     "total_task_time": total_duration,
+                    "group": task["group"],
                 }
-                uef_values.append(result)
                 print(f"{GREEN}Successfully completed: {title}{RESET}")
-            except multiprocessing.TimeoutError:
-                print(f"{RED}{title} simulation timed out after 300 seconds{RESET}")
-            except Exception as e:
-                print(f"{RED}{title} error in simulation process: {str(e)}{RESET}")
+            except Exception as exc:
+                print(
+                    f"{RED}{task['filename']} error in simulation process: "
+                    f"{exc}{RESET}"
+                )
+            finally:
+                if progress is not None:
+                    progress.advance()
 
-    # Print summary with colors
-    print(f"\n{BOLD}{YELLOW}Execution Summary:{RESET}")
-    for process, data in process_results.items():
-        print(
-            f"{GREEN}{process}: simulation time = {data['sim_time']:.2f} sec, "
-            f"wait time = {data['wait_time']:.2f} sec, total = {data['total_task_time']:.2f} sec, "
-            f"UEF: {data['uef']}{RESET}"
+    return process_results
+
+
+def _draw_output_cache_is_complete(task):
+    """Return whether a task has a usable intermediate draw-output CSV."""
+    draw_output_path = task["draw_output_path"]
+    return draw_output_path.is_file() and draw_output_path.stat().st_size > 0
+
+
+def cache_draw_outputs_for_tasks(
+    tasks,
+    process_results=None,
+    workers=None,
+):
+    """Calculate and cache draw metrics for completed tasks missing a cache."""
+    process_results = process_results or {}
+    tasks_to_calculate = []
+    for task in tasks:
+        if not _task_result_is_complete(task) or _draw_output_cache_is_complete(task):
+            continue
+        tasks_to_calculate.append(task)
+
+    if not tasks_to_calculate:
+        return 0
+
+    print(
+        f"{CYAN}Calculating and caching hot-water draw outputs for "
+        f"{len(tasks_to_calculate)} completed simulation(s){RESET}"
+    )
+    draw_outputs = {}
+    for test_type in sorted({task["test_type"] for task in tasks_to_calculate}):
+        file_map = {
+            task["filename"]: task["result_path"]
+            for task in tasks_to_calculate
+            if task["test_type"] == test_type
+        }
+        draw_outputs.update(
+            calculate_hot_water_delivered_from_paths(
+                file_map,
+                first_hour_test=test_type == "FHR",
+                workers=workers,
+            )
         )
 
-    # --- Calculate and print overall overhead statistics ---
-    _end_time = time.perf_counter()
-    total_time = _end_time - _start_time
+    cached_count = 0
+    for task in tasks_to_calculate:
+        file_key = task["filename"]
+        metrics = draw_outputs.get(file_key)
+        if metrics is None:
+            continue
+        metrics = dict(metrics)
+        metrics["test_type"] = task["test_type"]
 
-    # Sum up the total active simulation time and waiting time across all tasks
-    total_simulation_time = sum(data["sim_time"] for data in process_results.values())
-    total_wait_time = sum(data["wait_time"] for data in process_results.values())
+        uef = process_results.get(file_key, {}).get("uef")
+        if uef is None:
+            uef = calculate_uef(
+                pd.read_csv(task["result_path"], index_col="Time", parse_dates=True),
+                file_key,
+            )
+        export_draw_outputs_csv(
+            {file_key: metrics},
+            {file_key: uef},
+            task["draw_output_path"],
+        )
+        cached_count += 1
 
-    # Note: total_simulation_time is the sum across tasks, which is useful for profiling resource usage,
-    # but it will be larger than the wall-clock time since tasks run concurrently.
+    return cached_count
+
+
+def combine_cached_draw_outputs(tasks, csv_path):
+    """Append all intermediate draw-output CSVs into one final CSV."""
+    intermediate_paths = [
+        task["draw_output_path"]
+        for task in tasks
+        if _draw_output_cache_is_complete(task)
+    ]
+    if not intermediate_paths:
+        print(f"{YELLOW}No cached draw-output CSVs available for final export{RESET}")
+        return None, 0
+
+    exported_count = 0
+    for intermediate_path in intermediate_paths:
+        intermediate_df = pd.read_csv(intermediate_path)
+        export_draw_outputs_csv(
+            intermediate_df,
+            csv_path=csv_path,
+            append=exported_count > 0,
+        )
+        exported_count += len(intermediate_df)
+
+    return csv_path, exported_count
+
+
+def append_results_csv(source_csv, destination_csv):
+    """Append rows from a comparison CSV while preserving the union of columns."""
+    source_path = Path(source_csv).expanduser().resolve()
+    destination_path = Path(destination_csv).expanduser().resolve()
+    if not source_path.is_file():
+        raise FileNotFoundError(f"Comparison results CSV not found: {source_path}")
+    if source_path == destination_path:
+        raise ValueError("Comparison results CSV must differ from the destination CSV")
+
+    source_df = pd.read_csv(source_path)
+    if "test_type" not in source_df.columns:
+        if "is_FHR" in source_df.columns:
+            is_fhr = source_df["is_FHR"].map(
+                lambda value: str(value).strip().lower() in {"true", "1", "yes"}
+            )
+            source_df.insert(1, "test_type", np.where(is_fhr, "FHR", "UEF"))
+        elif "file_key" in source_df.columns:
+            source_df.insert(
+                1,
+                "test_type",
+                source_df["file_key"].str.extract(
+                    r"_(FHR|UEF)(?:\.csv)?$", expand=False
+                ),
+            )
+    if destination_path.is_file():
+        destination_df = pd.read_csv(destination_path)
+        columns = list(destination_df.columns)
+        columns.extend(
+            column for column in source_df.columns if column not in columns
+        )
+        combined_df = pd.concat(
+            [destination_df.reindex(columns=columns), source_df.reindex(columns=columns)],
+            ignore_index=True,
+        )
+    else:
+        combined_df = source_df
+
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    combined_df.to_csv(destination_path, index=False)
+    return len(source_df)
+
+
+def resolve_baseline_file(scenario, scenario_folder, config):
+    configured_baseline = scenario["baseline_file"] or config.get("baseline_file")
+    if configured_baseline is None:
+        return None
+
+    candidates = [
+        Path(config["config_base"]) / Path(configured_baseline).expanduser(),
+        Path.cwd() / Path(configured_baseline).expanduser(),
+        Path(configured_baseline).expanduser(),
+        scenario_folder / Path(configured_baseline).expanduser().name,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return candidates[-1].resolve()
+
+
+def generate_scenario_plots(
+    scenario,
+    scenario_folder,
+    case_paths_by_group,
+    baseline_paths_by_group,
+    config,
+    plot_output_folder,
+    image_scale,
+    show_plots=False,
+):
+    """Compare each setpoint/volume group and save all PNGs to one folder."""
+    try:
+        from bin.compare_2d_plots import process_single_folder
+    except Exception as exc:
+        print(f"{RED}Unable to import plot runner: {exc}{RESET}")
+        return []
+
+    configured_baseline = resolve_baseline_file(scenario, scenario_folder, config)
+    saved_plot_results = []
+    for group, case_paths in case_paths_by_group.items():
+        case_paths = [path for path in case_paths if path.is_file()]
+        # An explicitly configured baseline is independent of whether a new
+        # no-PCM simulation was requested. Generated baselines are fallback
+        # inputs only when no external baseline was configured.
+        baseline_path = configured_baseline
+        if baseline_path is None:
+            baseline_path = baseline_paths_by_group.get(group)
+            if baseline_path is not None and not baseline_path.is_file():
+                baseline_path = None
+
+        if not case_paths:
+            print(f"{YELLOW}No completed case CSVs found for group {group}; skipping plots{RESET}")
+            continue
+        if baseline_path is None or not baseline_path.is_file():
+            print(
+                f"{YELLOW}No baseline CSV found for setpoint {group[0]:g}F and "
+                f"{group[1]:g}gal; skipping plots{RESET}"
+            )
+            continue
+
+        # Always stage only this group. This avoids loading old CSVs that may
+        # already exist in a reused scenario folder and keeps each baseline
+        # matched to its setpoint and tank volume.
+        with tempfile.TemporaryDirectory(prefix="plot-input-") as staging_dir:
+            staging_path = Path(staging_dir)
+            for case_path in case_paths:
+                shutil.copy2(case_path, staging_path / case_path.name)
+            staged_baseline = staging_path / baseline_path.name
+            shutil.copy2(baseline_path, staged_baseline)
+
+            plot_result = process_single_folder(
+                staging_path,
+                staged_baseline.name,
+                show=show_plots,
+                plot_output_folder=plot_output_folder,
+                image_scale=image_scale,
+            )
+            saved_plot_results.append(
+                {
+                    "group": group,
+                    "baseline": str(baseline_path),
+                    "result": plot_result,
+                }
+            )
+
+    return saved_plot_results
+
+
+def run_scenario(
+    scenario,
+    config,
+    processes,
+    plot_output_folder,
+    image_scale,
+    generate_plots=True,
+    skip_showing_plots=True,
+    export_draw_outputs=False,
+    progress=None,
+):
+    scenario_start = time.perf_counter()
+    results_root = resolve_runner_path(config["results_root"], config["config_base"])
+    scenario_folder = results_root / scenario_folder_name(scenario)
+    scenario_folder.mkdir(parents=True, exist_ok=True)
+    if generate_plots:
+        plot_output_folder.mkdir(parents=True, exist_ok=True)
+
+    run_default_no_pcm = effective_run_default_no_pcm(scenario, config)
+    no_pcm_type = scenario["default_no_pcm_type"] or config["default_no_pcm_type"]
+    no_pcm_type = str(no_pcm_type).lower()
+    if no_pcm_type not in {"heatpump", "electric"}:
+        raise ValueError("default_no_pcm_type must be 'heatpump' or 'electric'")
+    tests = effective_scenario_tests(scenario, config)
+
+    print(f"\n{BOLD}{CYAN}Starting scenario: {scenario['name']}{RESET}")
+    print(f"Results folder: {scenario_folder}")
+    print(f"Plot folder: {plot_output_folder}")
+    print(f"Default no-PCM baseline: {'enabled' if run_default_no_pcm else 'disabled'}")
+
+    tasks, case_paths_by_group, baseline_paths_by_group = build_scenario_tasks(
+        scenario,
+        scenario_folder,
+        run_default_no_pcm=run_default_no_pcm,
+        no_pcm_type=no_pcm_type,
+        tests=tests,
+    )
+
+    cache_payload = scenario_cache_payload(
+        scenario,
+        run_default_no_pcm=run_default_no_pcm,
+        no_pcm_type=no_pcm_type,
+        tests=tests,
+    )
+    cached_tasks = cached_scenario_tasks(
+        tasks,
+        scenario_folder,
+        cache_payload,
+    )
+    if progress is not None:
+        progress.start_case(scenario["name"], len(tasks))
+        progress.advance(len(cached_tasks), force=True)
+    cached_filenames = {task["filename"] for task in cached_tasks}
+    tasks_to_run = [
+        task for task in tasks if task["filename"] not in cached_filenames
+    ]
+    if cached_tasks:
+        print(
+            f"{GREEN}Using {len(cached_tasks)} cached task result(s) from "
+            f"{scenario_folder}{RESET}"
+        )
+    simulation_start = time.perf_counter()
+    process_results = run_scenario_tasks(
+        tasks_to_run,
+        processes,
+        progress=progress,
+    )
+    simulation_seconds = time.perf_counter() - simulation_start
+    if progress is not None:
+        progress.render(force=True)
+
+    if export_draw_outputs:
+        cache_draw_outputs_for_tasks(
+            tasks,
+            process_results=process_results,
+            workers=processes,
+        )
+
+    if scenario_results_are_complete(tasks):
+        _write_scenario_cache(scenario_folder, cache_payload)
+        print(f"{GREEN}Scenario cache is complete: {SCENARIO_CACHE_FILE}{RESET}")
+
+    plot_start = time.perf_counter()
+    if not generate_plots:
+        plot_results = []
+        print(f"{YELLOW}Plot generation skipped by command-line option{RESET}")
+    else:
+        plot_results = generate_scenario_plots(
+            scenario,
+            scenario_folder,
+            case_paths_by_group,
+            baseline_paths_by_group,
+            config,
+            plot_output_folder,
+            image_scale,
+            show_plots=not skip_showing_plots,
+        )
+    plot_seconds = time.perf_counter() - plot_start
+    scenario_seconds = time.perf_counter() - scenario_start
+
     print(
-        f"\n{BOLD}{GREEN}Total wall-clock execution time: {total_time:.2f} seconds{RESET}"
+        f"{BOLD}{GREEN}Scenario {scenario['name']} complete: "
+        f"{len(process_results) + len(cached_tasks)}/{len(tasks)} simulations "
+        f"available ({len(process_results)} run, {len(cached_tasks)} cached), "
+        f"{len(plot_results)} plot group(s) generated{RESET}"
     )
     print(
-        f"{BOLD}{YELLOW}Aggregate simulation (processing) time: {total_simulation_time:.2f} seconds{RESET}"
+        f"Scenario timing: simulations {simulation_seconds:.2f}s; "
+        f"plots {plot_seconds:.2f}s; total {scenario_seconds:.2f}s"
     )
+    return {
+        "scenario": scenario["name"],
+        "folder": str(scenario_folder),
+        "tasks": tasks,
+        "process_results": process_results,
+        "cached_tasks": len(cached_tasks),
+        "completed_simulations": len(process_results) + len(cached_tasks),
+        "plot_results": plot_results,
+        "timing": {
+            "simulation_seconds": simulation_seconds,
+            "plot_seconds": plot_seconds,
+            "total_seconds": scenario_seconds,
+        },
+    }
+
+
+def parse_runner_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run multiple PCM water-heater scenarios sequentially, then generate "
+            "2-D comparison PNGs."
+        )
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="JSON runner config containing a 'scenarios' array",
+    )
+    parser.add_argument(
+        "--run-default-no-pcm",
+        action="store_true",
+        help="Run a no-PCM baseline for every scenario setpoint/tank-volume pair",
+    )
+    parser.add_argument(
+        "--no-pcm-type",
+        choices=["heatpump", "electric"],
+        default=None,
+        help="Water-heater type for the generated no-PCM baseline",
+    )
+    parser.add_argument(
+        "--results-root",
+        type=Path,
+        help="Override the configured root for scenario result folders",
+    )
+    parser.add_argument(
+        "--plot-output",
+        type=Path,
+        help="Override the single folder receiving all generated PNGs",
+    )
+    parser.add_argument(
+        "--baseline-file",
+        type=Path,
+        help="Existing baseline CSV to use for plots, independent of no-PCM generation",
+    )
+    parser.add_argument(
+        "--processes",
+        type=int,
+        help="Workers for grid points within each scenario; scenarios remain sequential",
+    )
+    parser.add_argument(
+        "--image-scale",
+        type=int,
+        help="Plotly PNG scale multiplier (default: configured 4)",
+    )
+    parser.add_argument(
+        "--generate-plots",
+        action="store_true",
+        help="Generate comparison plots for each completed scenario",
+    )
+    parser.add_argument(
+        "--skip-showing-plots",
+        action="store_true",
+        help="Generate and save plots without opening figures in a web browser",
+    )
+    parser.add_argument(
+        "--export-draw-outputs",
+        action="store_true",
+        help="Calculate hot-water draw metrics and export all completed results to one CSV",
+    )
+    parser.add_argument(
+        "--draw-outputs-csv",
+        type=Path,
+        help=(
+            "CSV path for draw-output metrics; supplying this option also enables "
+            "the draw-output export"
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_runner_args(argv)
+    config = load_runner_config(args.config)
+
+    if args.run_default_no_pcm:
+        config["run_default_no_pcm"] = True
+        for scenario in config["scenarios"]:
+            scenario["run_default_no_pcm"] = True
+    if args.no_pcm_type is not None:
+        config["default_no_pcm_type"] = args.no_pcm_type
+        for scenario in config["scenarios"]:
+            scenario["default_no_pcm_type"] = args.no_pcm_type
+    if args.results_root is not None:
+        config["results_root"] = str(args.results_root)
+    if args.baseline_file is not None:
+        config["baseline_file"] = str(args.baseline_file)
+    if args.processes is not None:
+        if args.processes < 1:
+            raise ValueError("--processes must be at least 1")
+        config["processes"] = args.processes
+    if args.image_scale is not None:
+        if args.image_scale < 1:
+            raise ValueError("--image-scale must be at least 1")
+        config["image_scale"] = args.image_scale
+    if args.draw_outputs_csv is not None:
+        config["draw_outputs_csv"] = str(args.draw_outputs_csv)
+
+    export_draw_outputs = bool(config.get("export_draw_outputs", False))
+    export_draw_outputs = export_draw_outputs or args.export_draw_outputs
+    export_draw_outputs = export_draw_outputs or args.draw_outputs_csv is not None
+
+    plot_output_folder = resolve_runner_path(
+        args.plot_output or config["plot_output_folder"],
+        config["config_base"],
+    )
+    processes = config.get("processes")
+    image_scale = int(config.get("image_scale", 4))
+    if image_scale < 1:
+        raise ValueError("image_scale must be at least 1")
+    # Support both the Python-style config key and the hyphenated spelling
+    # used by older JSON configs. CLI flags take precedence over JSON.
+    generate_plots = bool(config.get("generate_plots", True))
+    if "generate-plots" in config:
+        generate_plots = bool(config["generate-plots"])
+    if args.generate_plots:
+        generate_plots = True
+    skip_showing_plots = bool(
+        config.get(
+            "skip_showing_plots",
+            config.get("skip_plots", config.get("skip-plots", True)),
+        )
+    )
+    if args.skip_showing_plots:
+        skip_showing_plots = True
+
+    total_start = time.perf_counter()
+    total_case_count = sum(
+        scenario_task_count(
+            scenario,
+            effective_run_default_no_pcm(scenario, config),
+            effective_scenario_tests(scenario, config),
+        )
+        for scenario in config["scenarios"]
+    )
+    progress = ProgressBars(total_case_count)
+    print(f"{BOLD}{GREEN}Starting sequential scenario runner{RESET}")
+    print(f"Scenarios: {len(config['scenarios'])}")
+    print(f"Total simulation cases: {total_case_count}")
+    print(f"All plots will be saved to: {plot_output_folder}")
+
+    run_results = []
+    for scenario in config["scenarios"]:
+        run_results.append(
+            run_scenario(
+                scenario,
+                config,
+                processes=processes,
+                plot_output_folder=plot_output_folder,
+                image_scale=image_scale,
+                generate_plots=generate_plots,
+                skip_showing_plots=skip_showing_plots,
+                export_draw_outputs=export_draw_outputs,
+                progress=progress,
+            )
+        )
+
+    if export_draw_outputs:
+        draw_outputs_csv = resolve_runner_path(
+            config["draw_outputs_csv"],
+            config["config_base"],
+        )
+        all_tasks = [task for result in run_results for task in result["tasks"]]
+        exported_path, exported_count = combine_cached_draw_outputs(
+            all_tasks,
+            draw_outputs_csv,
+        )
+        if exported_path is not None:
+            print(
+                f"{GREEN}Exported {exported_count} draw-output result(s) to "
+                f"{exported_path}{RESET}"
+            )
+            comparison_csv = config.get("append_results_csv")
+            if comparison_csv:
+                comparison_csv = resolve_runner_path(
+                    comparison_csv,
+                    config["config_base"],
+                )
+                appended_count = append_results_csv(
+                    comparison_csv,
+                    exported_path,
+                )
+                print(
+                    f"{GREEN}Appended {appended_count} comparison result(s) from "
+                    f"{comparison_csv} to {exported_path}{RESET}"
+                )
+
+    total_seconds = time.perf_counter() - total_start
+    total_simulations = sum(
+        result["completed_simulations"] for result in run_results
+    )
+    total_plots = sum(len(result["plot_results"]) for result in run_results)
     print(
-        f"{BOLD}{YELLOW}Aggregate waiting (queue delay) time: {total_wait_time:.2f} seconds{RESET}"
+        f"\n{BOLD}{GREEN}All scenarios complete: "
+        f"{total_simulations} successful simulations, {total_plots} plot groups, "
+        f"{total_seconds:.2f}s total wall-clock time{RESET}"
     )
-    overhead_percentage = (total_wait_time / total_time * 100) if total_time > 0 else 0
-    print(
-        f"{BOLD}{RED}Overhead due to queue delays: {total_wait_time:.2f} seconds ({overhead_percentage:.2f}% of wall-clock time){RESET}"
-    )
-    
-    _start_time_move_results = time.perf_counter()
-    move_results(
-        main_results_folder,
-        graphing_results_folder,
-        num_files_to_move=len(process_results.items()),
-    )
-    print(
-        f"{BOLD}{GREEN}{len(process_results.items())} results moved to {graphing_results_folder} in {time.perf_counter() - _start_time_move_results:.2f} seconds{RESET}"
-    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

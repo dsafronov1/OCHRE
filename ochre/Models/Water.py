@@ -167,6 +167,7 @@ class StratifiedWaterModel(RCModel):
         # calculate total draw volume from tempered draw volume(s)
         # for tempered draw, assume outlet temperature == T1, slightly off if the water draw is very large
         if self.tempered_draw_temp < self.setpoint_temp:
+            self.draw_hot = draw_hot
             if self.outlet_temp <= self.hot_draw_temp:
                 self.draw_total = draw_hot
                 self.draw_tempered_temperature = self.outlet_temp

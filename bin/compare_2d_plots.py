@@ -1,16 +1,21 @@
-import multiprocessing
+import argparse
 import os
+import time
+from pickle import TRUE
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy.interpolate import griddata
 from pathlib import Path
 import re
-import pickle
-import time
 import numpy as np
-import concurrent.futures
-from calculate_hot_water_delivered import calculate_hot_water_delivered
+
+try:
+    # Package/module execution: ``python -m bin...``
+    from .calculate_hot_water_delivered import calculate_hot_water_delivered
+except ImportError:
+    # Direct script execution: ``python bin/compare_2d_plots.py``
+    from calculate_hot_water_delivered import calculate_hot_water_delivered
 
 
 L_TO_GAL_RATIO = 0.264172
@@ -169,7 +174,18 @@ def plot_draw_events(draw_outputs):
     fig.show()
 
 
-def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title, z_label, baseline_value=None):
+def create_interpolated_plot(
+    df,
+    z_column,
+    x_mesh,
+    y_mesh,
+    x_grid,
+    y_grid,
+    title,
+    z_label,
+    baseline_value=None,
+    baseline_description=None,
+):
     import numpy as np
     import plotly.graph_objects as go
     from scipy.interpolate import griddata
@@ -200,7 +216,7 @@ def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title
     fig = go.Figure()
 
     # Define whether higher values are better or worse based on metric
-    higher_is_better = z_column in ['total_heat_delivered_kWh', 'total_gal_hot_water_delivered', 'total_energy_used', 'first_draw_hot_water_delivered']
+    higher_is_better = z_column in ['total_heat_delivered_kWh', 'total_gal_hot_water_delivered', 'total_energy_used', 'first_draw_hot_water_delivered', 'first_draw_hot_water_delivered_liters', 'total_water_FHR_volume_L']
 
     # Color scales
     vibrant_colorscale = [
@@ -397,7 +413,14 @@ def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title
         ))
 
     # Title / axes
-    title_with_baseline = f"{title} (Baseline: {baseline_value:.2f} Gal {z_label.split('(')[0].strip()})" if baseline_value is not None else title
+    if baseline_value is not None:
+        if baseline_description:
+            baseline_text = f"{baseline_description} ({baseline_value:.2f} L)"
+        else:
+            baseline_text = f"{baseline_value:.2f} {z_label.split('(')[0].strip()}"
+        title_with_baseline = f"{title}<br>Baseline: {baseline_text}"
+    else:
+        title_with_baseline = title
     fig.update_layout(
         title=title_with_baseline,
         title_font=dict(size=18),
@@ -410,29 +433,29 @@ def create_interpolated_plot(df, z_column, x_mesh, y_mesh, x_grid, y_grid, title
     )
 
     # Baseline status banner
-    if baseline_value is not None:
-        all_worse = all(((not higher_is_better) and val > baseline_value) or (higher_is_better and val < baseline_value) for val in values)
-        all_better = all((higher_is_better and val > baseline_value) or ((not higher_is_better) and val < baseline_value) for val in values)
+    # if baseline_value is not None:
+    #     all_worse = all(((not higher_is_better) and val > baseline_value) or (higher_is_better and val < baseline_value) for val in values)
+    #     all_better = all((higher_is_better and val > baseline_value) or ((not higher_is_better) and val < baseline_value) for val in values)
 
-        if all_worse:
-            status_msg, status_color = "⚠️ All values WORSE than baseline", "red"
-        elif all_better:
-            status_msg, status_color = "✓ All values BETTER than baseline", "green"
-        else:
-            status_msg, status_color = "Grey = worse than baseline; Color = ≥ baseline", "gray"
+    #     if all_worse:
+    #         status_msg, status_color = "⚠️ All values WORSE than baseline", "red"
+    #     elif all_better:
+    #         status_msg, status_color = "✓ All values BETTER than baseline", "green"
+    #     else:
+    #         status_msg, status_color = "Grey = worse than baseline; Color = ≥ baseline", "gray"
 
-        fig.add_annotation(
-            text=status_msg,
-            xref="paper", yref="paper",
-            x=0.01, y=0.99,
-            showarrow=False,
-            align="left",
-            font=dict(size=8, color=status_color, family="Arial Black"),
-            bordercolor=status_color,
-            borderwidth=2,
-            bgcolor="white",
-            opacity=0.9
-        )
+    #     fig.add_annotation(
+    #         text=status_msg,
+    #         xref="paper", yref="paper",
+    #         x=0.01, y=0.99,
+    #         showarrow=False,
+    #         align="left",
+    #         font=dict(size=8, color=status_color, family="Arial Black"),
+    #         bordercolor=status_color,
+    #         borderwidth=2,
+    #         bgcolor="white",
+    #         opacity=0.9
+    #     )
 
     return fig
 
@@ -575,7 +598,7 @@ def plot_2d_comparison(dfs, draw_outputs, setpoint, pcm_temp, tank_type, tank_si
         df_plot_clean.dropna(subset=['total_gal_hot_water_delivered']),
         'total_gal_hot_water_delivered', x_mesh, y_mesh, x_grid, y_grid,
         f"h vs SA_ratio Design Matrix with Cut off Temp 110°F for {tank_type} Water Heater<br>Setpoint: {setpoint}°F PCM Melt Temp: {pcm_temp}°F <br>Tank Size: {tank_size} gal",
-        "Total Hot Water (>110°F)<br>Delivered (gal)",
+        "FHR (>110°F)<br>Delivered (gal)",
         baseline_value
     )
 
@@ -598,241 +621,258 @@ def plot_2d_comparison(dfs, draw_outputs, setpoint, pcm_temp, tank_type, tank_si
     }
     
     
-def plot_2d_comparison_generic(dfs, draw_outputs, x_column_pattern, y_column_pattern, setpoint=None, pcm_temp=None, tank_type=None, tank_size=None):
-    import logging, re, traceback
-    import numpy as np
-    import pandas as pd
+def plot_2d_comparison_generic(
+    dfs,
+    draw_outputs,
+    x_column_pattern,
+    y_column_pattern,
+    setpoint=None,
+    pcm_temp=None,
+    tank_type=None,
+    tank_size=None,
+    baseline_file=None,
+    case_title=None,
+    baseline_title=None,
+    show=True,
+    save_folder=None,
+    image_scale=4,
+):
+    """Create the first-hour and initial-draw 2-D comparison plots.
 
-    # ---------- logger setup (scoped, non-invasive) ----------
+    ``dfs`` contains the case files and one explicitly selected baseline file.
+    The old folder-based callers can still omit ``baseline_file``; in that
+    case the historical no-PCM-column fallback is retained.
+    """
+    import logging
+    import traceback
+
     logger = logging.getLogger("plot_2d_comparison_generic")
     if not logger.handlers:
-        _h = logging.StreamHandler()
-        _h.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
-        logger.addHandler(_h)
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+        logger.addHandler(handler)
         logger.setLevel(logging.INFO)
 
-    logger.debug(f"Start plot_2d_comparison_generic with {len(dfs)} dfs; "
-                 f"x_pattern='{x_column_pattern}', y_pattern='{y_column_pattern}', "
-                 f"setpoint={setpoint}, pcm_temp={pcm_temp}, tank_type={tank_type}, tank_size={tank_size}")
-
-    data = []
-    baseline_file = None
-    baseline_value = None
-
-    # Quick validation
     if not isinstance(dfs, dict) or not dfs:
         logger.error("`dfs` must be a non-empty dict of {filename: DataFrame}.")
         return None
     if not isinstance(draw_outputs, dict) or not draw_outputs:
         logger.warning("`draw_outputs` is empty or not a dict; energy metrics may be None.")
 
-    # ---------- iterate inputs ----------
+    baseline_key = Path(baseline_file).name if baseline_file else None
+    data = []
+    detected_baseline_file = None
+
     for file, df in dfs.items():
         if df is None or not hasattr(df, "columns"):
             logger.error(f"[{file}] df is not a DataFrame-like object.")
             continue
 
-        logger.debug(f"[{file}] columns: {list(df.columns)}")
-        has_pcm = any('PCM' in col for col in df.columns)
-        is_baseline = not has_pcm
-        logger.debug(f"[{file}] has_pcm={has_pcm}, is_baseline={is_baseline}")
+        file_key = Path(file).name
+        has_pcm = any("PCM" in str(col) for col in df.columns)
+        is_baseline = file_key == baseline_key if baseline_key else not has_pcm
+        if is_baseline:
+            detected_baseline_file = file_key
 
         x_values, y_values = [], []
-
         try:
             if is_baseline:
-                baseline_file = file
                 for col in df.columns:
-                    if (x_column_pattern in col) and ("Water Tank" in col) and ("PCM" not in col):
-                        val = df[col].astype(float).mean()
-                        x_values.append(val)
-                        logger.debug(f"[{file}] baseline X <- {col}: mean={val:.6g}")
-                    if (y_column_pattern in col) and ("Water Tank" in col) and ("PCM" not in col):
-                        val = df[col].astype(float).mean()
-                        y_values.append(val)
-                        logger.debug(f"[{file}] baseline Y <- {col}: mean={val:.6g}")
+                    # Keep baseline extraction restricted to non-PCM tank columns.
+                    if "Water Tank" not in col or "PCM" in col:
+                        continue
+                    if x_column_pattern in col:
+                        x_values.append(float(df[col].astype(float).mean()))
+                    if y_column_pattern in col:
+                        y_values.append(float(df[col].astype(float).mean()))
             else:
                 for col in df.columns:
-                    pcm_match = re.search(r"Water Tank PCM(\d+)", col)
-                    if pcm_match and (x_column_pattern in col):
-                        val = df[col].astype(float).mean()
-                        x_values.append(val)
-                        logger.debug(f"[{file}] PCM X <- {col}: mean={val:.6g}")
-                    if pcm_match and (y_column_pattern in col):
-                        val = df[col].astype(float).mean()
-                        y_values.append(val)
-                        logger.debug(f"[{file}] PCM Y <- {col}: mean={val:.6g}")
-        except Exception as e:
-            logger.error(f"[{file}] Error while extracting X/Y: {e}\n{traceback.format_exc()}")
+                    if not re.search(r"Water Tank PCM\d+", col):
+                        continue
+                    if x_column_pattern in col:
+                        x_values.append(float(df[col].astype(float).mean()))
+                    if y_column_pattern in col:
+                        y_values.append(float(df[col].astype(float).mean()))
+        except Exception:
+            logger.error(f"[{file}] Error while extracting X/Y:\n{traceback.format_exc()}")
 
         if x_values and y_values:
             avg_x = float(np.nanmean(x_values))
             avg_y = float(np.nanmean(y_values))
         else:
-            logger.warning(f"[{file}] Missing values: x_values={len(x_values)}, y_values={len(y_values)}. Setting averages to 0.")
+            logger.warning(
+                f"[{file}] Missing values: x_values={len(x_values)}, "
+                f"y_values={len(y_values)}. Setting averages to 0."
+            )
             avg_x, avg_y = 0.0, 0.0
 
-        # ---------- draw_outputs / metrics ----------
-        do = draw_outputs.get(file, {})
-        if not do:
-            logger.warning(f"[{file}] draw_outputs missing for this file.")
+        metrics = draw_outputs.get(file, draw_outputs.get(file_key, {})) or {}
+        draw_events = metrics.get("draw_events")
+        first_draw_hot_water_delivered = (
+            draw_events[0].get("water_volume_L")
+            if isinstance(draw_events, list) and draw_events
+            else None
+        )
 
-        total_gal_hot_water_delivered = do.get('total_water_volume_gal')
-        total_delivered = do.get('total_heat_delivered_kWh')
-        total_used = do.get('total_energy_used_kwh')
-        average_pcm_temp = do.get('average_pcm_temp')
+        data.append(
+            {
+                "file": file_key,
+                "avg_x_value": avg_x,
+                "avg_y_value": avg_y,
+                "total_gal_hot_water_delivered": metrics.get("total_water_delivered_volume_gal"),
+                "total_liters_hot_water_delivered": metrics.get("total_water_delivered_volume_liters"),
+                "total_water_FHR_volume_L": metrics.get("total_water_FHR_volume_L"),
+                "total_water_FHR_volume_gal": metrics.get("total_water_FHR_volume_gal"),
+                "total_heat_delivered_kWh": metrics.get("total_heat_delivered_kWh"),
+                "total_energy_used": metrics.get("total_energy_used_kwh"),
+                "is_baseline": is_baseline,
+                "first_draw_hot_water_delivered": first_draw_hot_water_delivered,
+                "average_pcm_temp": metrics.get("average_pcm_temp"),
+            }
+        )
 
-        draw_events = do.get('draw_events', None)
-        if isinstance(draw_events, list) and draw_events:
-            first_draw_hot_water_delivered = draw_events[0].get('water_volume_gal', None)
-        else:
-            first_draw_hot_water_delivered = None
-            logger.debug(f"[{file}] draw_events missing/empty; first_draw_hot_water_delivered=None")
-
-        logger.debug(f"[{file}] metrics: total_gal={total_gal_hot_water_delivered}, "
-                     f"delivered_kWh={total_delivered}, used_kWh={total_used}, "
-                     f"first_draw_gal={first_draw_hot_water_delivered}, avg_pcm_temp={average_pcm_temp}")
-
-        data.append({
-            'file': file,
-            'avg_x_value': avg_x,
-            'avg_y_value': avg_y,
-            'total_gal_hot_water_delivered': total_gal_hot_water_delivered,
-            'total_heat_delivered_kWh': total_delivered,
-            'total_energy_used': total_used,
-            'is_baseline': is_baseline,
-            'first_draw_hot_water_delivered': first_draw_hot_water_delivered,
-            "average_pcm_temp": average_pcm_temp
-        })
-
-    # ---------- assemble dataframe ----------
     df_plot = pd.DataFrame(data)
-    logger.debug(f"df_plot shape={df_plot.shape}\n{df_plot.head(10)}")
+    df_plot_clean = df_plot.dropna(subset=["avg_x_value", "avg_y_value"])
 
-    # Drop any rows with missing x/y
-    df_plot_clean = df_plot.dropna(subset=['avg_x_value', 'avg_y_value'])
-    logger.debug(f"df_plot_clean after x/y dropna shape={df_plot_clean.shape}")
+    baseline_value_fhr = None
+    baseline_value_initial_draw = None
+    if detected_baseline_file:
+        baseline_rows = df_plot_clean[df_plot_clean["is_baseline"]]
+        if not baseline_rows.empty:
+            baseline_fhr = baseline_rows["total_water_FHR_volume_L"].iloc[0]
+            baseline_initial_draw = baseline_rows["first_draw_hot_water_delivered"].iloc[0]
+            baseline_value_fhr = baseline_fhr if pd.notna(baseline_fhr) else None
+            baseline_value_initial_draw = (
+                baseline_initial_draw if pd.notna(baseline_initial_draw) else None
+            )
 
-    # baseline value
-    if baseline_file:
-        baseline_row = df_plot_clean[df_plot_clean['is_baseline'] == True]
-        if not baseline_row.empty:
-            baseline_value = baseline_row['total_gal_hot_water_delivered'].values[0]
-            logger.debug(f"baseline_file={baseline_file}, baseline_value(total_gal)={baseline_value}")
-        else:
-            logger.debug("No baseline row found after cleaning.")
-    else:
-        logger.debug("No baseline_file identified.")
-
-    # filter out baseline from plotting
-    pre_filter_rows = df_plot_clean.shape[0]
-    df_plot_clean = df_plot_clean[df_plot_clean['is_baseline'] == False]
-    logger.debug(f"Filtered out baseline rows: {pre_filter_rows} -> {df_plot_clean.shape[0]}")
-
-    if df_plot_clean.empty:
+    case_rows = df_plot_clean[~df_plot_clean["is_baseline"]]
+    if case_rows.empty:
         logger.error("No non-baseline data available for plotting.")
         return None
 
-    # ---------- interpolation grid ----------
+    grid_resolution = 100
     try:
-        grid_resolution = 100
-        x_min, x_max = df_plot_clean['avg_x_value'].min(), df_plot_clean['avg_x_value'].max()
-        y_min, y_max = df_plot_clean['avg_y_value'].min(), df_plot_clean['avg_y_value'].max()
-        logger.debug(f"x_range=({x_min}, {x_max}), y_range=({y_min}, {y_max})")
+        x_min, x_max = case_rows["avg_x_value"].min(), case_rows["avg_x_value"].max()
+        y_min, y_max = case_rows["avg_y_value"].min(), case_rows["avg_y_value"].max()
 
-        # buffer handling (avoid zero span)
         x_span = float(x_max - x_min)
         y_span = float(y_max - y_min)
         if x_span == 0:
             logger.warning("x_span is zero; expanding artificially by ±1.")
-            x_min, x_max = x_min - 1.0, x_max + 1.0
-            x_span = 2.0
+            x_min, x_max, x_span = x_min - 1.0, x_max + 1.0, 2.0
         if y_span == 0:
             logger.warning("y_span is zero; expanding artificially by ±1.")
-            y_min, y_max = y_min - 1.0, y_max + 1.0
-            y_span = 2.0
+            y_min, y_max, y_span = y_min - 1.0, y_max + 1.0, 2.0
 
         x_buffer = max(x_span * 0.05, 1e-9)
         y_buffer = max(y_span * 0.05, 1e-9)
-
         x_grid = np.linspace(x_min - x_buffer, x_max + x_buffer, grid_resolution)
         y_grid = np.linspace(y_min - y_buffer, y_max + y_buffer, grid_resolution)
         x_mesh, y_mesh = np.meshgrid(x_grid, y_grid)
-        logger.debug(f"Grid shapes: x_grid={x_grid.shape}, y_grid={y_grid.shape}, x_mesh={x_mesh.shape}, y_mesh={y_mesh.shape}")
-    except Exception as e:
-        logger.error(f"Error building interpolation grid: {e}\n{traceback.format_exc()}")
+    except Exception:
+        logger.error(f"Error building interpolation grid:\n{traceback.format_exc()}")
         return None
 
-    # ---------- plotting ----------
-    def _safe_plot(df_in, z_col, title, z_label):
+    case_files = case_rows["file"].tolist()
+    if case_title is None:
+        case_title = format_case_title(case_files[0])
+
+    # Use metadata from the file name when the caller did not provide legacy
+    # folder metadata. This removes the old setpoint/PCM/tank filters while
+    # keeping the title useful for direct programmatic calls.
+    case_metadata = parse_case_filename(case_files[0])
+    setpoint = setpoint if setpoint is not None else case_metadata.get("setpoint")
+    tank_size = tank_size if tank_size is not None else case_metadata.get("tank_size")
+
+    title_details = ["Cutoff=110°F"]
+    if setpoint is not None:
+        title_details.append(f"Setpoint={format_number(setpoint)}°F")
+    if pcm_temp is not None:
+        title_details.append(f"PCM Melt={format_number(pcm_temp)}°F")
+    if tank_size is not None:
+        title_details.append(f"Tank Size={format_number(tank_size)} gal")
+    title_suffix = "; ".join(title_details)
+
+    def safe_plot(df_in, z_col, title, z_label, baseline_value):
+        """Call ``create_interpolated_plot`` without allowing one bad metric to stop the run."""
         try:
             if df_in is None or df_in.empty:
                 logger.warning(f"Skip plot for {z_col}: input df is empty.")
                 return None
-            logger.debug(f"Plotting {z_col}: rows={df_in.shape[0]}, na_counts={df_in.isna().sum().to_dict()}")
             fig = create_interpolated_plot(
                 df_in.dropna(subset=[z_col]),
-                z_col, x_mesh, y_mesh, x_grid, y_grid,
-                title, z_label, baseline_value
+                z_col,
+                x_mesh,
+                y_mesh,
+                x_grid,
+                y_grid,
+                title,
+                z_label,
+                baseline_value,
+                baseline_title,
             )
             if fig is None:
                 logger.warning(f"create_interpolated_plot returned None for {z_col}.")
             return fig
-        except Exception as e:
-            logger.error(f"Exception plotting {z_col}: {e}\n{traceback.format_exc()}")
+        except Exception:
+            logger.error(f"Exception plotting {z_col}:\n{traceback.format_exc()}")
             return None
 
-    name = "PCM Temp Parametric 88% Resin PCM 74% Loading"
-    
     title_total = (
-        f"{name} First-Hour Rating:<br>{y_column_pattern} vs SA/V Ratio "
-        f"Cutoff=110°F; Setpoint={setpoint}°F; PCM Melt={pcm_temp}°F<br>Tank Size: {tank_size} gal"
+        f"{case_title} First-Hour Rating (FHR)<br>{y_column_pattern} vs SA/V Ratio {title_suffix}"
     )
-    fig_total_water = _safe_plot(
-        df_plot_clean.dropna(subset=['total_gal_hot_water_delivered']),
-        'total_gal_hot_water_delivered',
+    fig_total_water = safe_plot(
+        case_rows.dropna(subset=["total_water_FHR_volume_L"]),
+        "total_water_FHR_volume_L",
         title_total,
-        "Total Hot Water (>110°F)<br>Delivered (gal)"
+        "FHR (>110°F) (L)",
+        baseline_value_fhr,
     )
 
     title_first = (
-        f"{name} Initial Draw Rating:<br>{y_column_pattern} vs SA/V Ratio "
-        f"Cutoff=110°F; Setpoint={setpoint}°F; PCM Melt={pcm_temp}°F<br>Tank Size: {tank_size} gal"
+        f"{case_title} Initial Draw Rating<br>{y_column_pattern} vs SA/V Ratio {title_suffix}"
     )
-    fig_firstdraw_water = _safe_plot(
-        df_plot_clean.dropna(subset=['first_draw_hot_water_delivered']),
-        'first_draw_hot_water_delivered',
+    fig_firstdraw_water = safe_plot(
+        case_rows.dropna(subset=["first_draw_hot_water_delivered"]),
+        "first_draw_hot_water_delivered",
         title_first,
-        "First Draw Hot Water (>110°F)<br>Delivered (gal)"
+        "Hot Water (>110°F)<br>Delivered (L)",
+        baseline_value_initial_draw,
     )
 
-    # Display (guarded)
-    try:
-        if fig_total_water:
-            logger.debug("Showing fig_total_water.")
-            fig_total_water.show()
-        if fig_firstdraw_water:
-            logger.debug("Showing fig_firstdraw_water.")
-            fig_firstdraw_water.show()
-    except Exception as e:
-        logger.error(f"Error showing figures: {e}\n{traceback.format_exc()}")
+    saved_files = {}
+    if save_folder is not None:
+        saved_files = save_comparison_figures(
+            {"water": fig_total_water, "first_draw": fig_firstdraw_water},
+            case_title,
+            save_folder,
+            scale=image_scale,
+            case_setpoint=setpoint,
+            baseline_filename=baseline_file,
+        )
 
-    result = {
-        "baseline_value": baseline_value,
-        "baseline_file": baseline_file,
-        "figures": {
-            "water": fig_total_water,
-            "first_draw": fig_firstdraw_water
-        },
+    if show:
+        try:
+            if fig_total_water:
+                fig_total_water.show()
+            if fig_firstdraw_water:
+                fig_firstdraw_water.show()
+        except Exception:
+            logger.error(f"Error showing figures:\n{traceback.format_exc()}")
+
+    return {
+        "baseline_value": baseline_value_fhr,
+        "baseline_file": detected_baseline_file,
+        "figures": {"water": fig_total_water, "first_draw": fig_firstdraw_water},
+        "saved_files": saved_files,
         "debug": {
             "rows_total": int(df_plot.shape[0]),
-            "rows_clean": int(df_plot_clean.shape[0]),
+            "rows_clean": int(case_rows.shape[0]),
             "x_range": (float(x_min), float(x_max)),
             "y_range": (float(y_min), float(y_max)),
-        }
+        },
     }
-    logger.debug(f"Result summary: {result['debug']}")
-    return result
 
 # Predefined lookup arrays for water properties at 1 atm.
 _TEMPS = np.array([0, 4, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100], dtype=float)
@@ -1845,169 +1885,288 @@ def plot_pcm_enthalpies(df):
     return fig
 
 
-
-# ANSI color codes
-RESET = "\033[0m"
-BOLD = "\033[1m"
-GREEN = "\033[92m"
-CYAN = "\033[96m"
-YELLOW = "\033[93m"
-RED = "\033[91m"
+def format_number(value):
+    """Format a numeric filename field without an unnecessary trailing ``.0``."""
+    return f"{float(value):g}"
 
 
-# Compile these once at module load
-SETPOINT_REGEX = re.compile(r"(\d+(?:\.\d+)?)F$")
-PCM_SHIFT_REGEX = re.compile(r"60-40_PCM55-TPU_cp-h-T_data_shifted_(\d+(?:\.\d+)?)F", re.IGNORECASE)
-TYPE_REGEX = re.compile(r"(Electric|Heat[Pp]ump)")
-SIZE_REGEX = re.compile(r"(\d+)gal")
+def parse_case_filename(filename):
+    """Extract the title metadata encoded in a case CSV filename."""
+    stem = Path(filename).stem
+    case_match = re.search(r"^case(?P<case>\d+)", stem, re.IGNORECASE)
+    hx_match = re.search(r"^case\d+_(?P<hx>\d+(?:\.\d+)?)_", stem, re.IGNORECASE)
+    loading_match = re.search(r"(?P<loading>\d+(?:\.\d+)?)%", stem)
+    if loading_match is None:
+        # The 60-40 PCM55-TPU file encodes its PCM fraction as ``60-40``
+        # instead of using a percent sign.
+        loading_match = re.search(
+            r"(?P<loading>\d+(?:\.\d+)?)-40[_-]PCM",
+            stem,
+            re.IGNORECASE,
+        )
+    setpoint_match = re.search(r"setpoint-(?P<setpoint>\d+(?:\.\d+)?)F", stem, re.IGNORECASE)
+    tank_match = re.search(r"(?P<tank>\d+(?:\.\d+)?)gal", stem, re.IGNORECASE)
 
-def process_single_folder(output_folder, folder):
-    """Process one folder (setpoint) within an output folder."""
-    # 1. Extract setpoint from the folder name
-    m_sp = SETPOINT_REGEX.search(folder)
-    if not m_sp:
-        print(f"⚠️  Could not parse setpoint from folder '{folder}'")
-        return
-    setpoint = float(m_sp.group(1))
-    
-    # 2. Extract pcm_temp from the output_folder path
-    #    e.g. output_folder ends with ".../cp_h-T_data_shifted_120F"
-    m_pcm = PCM_SHIFT_REGEX.search(folder)
-    if not m_pcm:
-        print(f"⚠️  Could not parse PCM shift temperature from '{output_folder}'")
-        return
-    pcm_temp = float(m_pcm.group(1))
-    
-    
-    m_size = SIZE_REGEX.search(folder)
-    if not m_size:
-        print(f"⚠️  Could not parse tank size from '{output_folder}'")
-        return
-    tank_size = float(m_size.group(1))
-    
-    
-    m_tank_type = TYPE_REGEX.search(folder)
-    if not m_tank_type:
-        print(f"⚠️  Could not parse type from '{output_folder}'")
-        return
-    
-    tank_type = m_tank_type.group(1)
-    
-    if setpoint <= pcm_temp:
-        print(f"⚠️  Setpoint {setpoint}F is lower than PCM melt temperature {pcm_temp}F")
-        return
-    
-    if tank_size != 40:
-        print(f"⚠️  Tank size {tank_size} is not 40gal")
-        return
-    
-    not_correct_pcm_temp = False
-    correct_pcm_temps = [131, 127]
-    if pcm_temp not in correct_pcm_temps:
-        print(f"⚠️  PCM temperature {pcm_temp} is not 131F or 127F")
-        not_correct_pcm_temp = True
-    
-    if not_correct_pcm_temp:
-        return
-    
-    # 3. Build the full folder path and load data
-    dfs = load_data(results_folder=output_folder)
-    
-    # 4. Your existing analysis & plotting calls
+    return {
+        "case": int(case_match.group("case")) if case_match else None,
+        "hx": float(hx_match.group("hx")) * 100 if hx_match else None,
+        "pcm_loading": float(loading_match.group("loading")) if loading_match else None,
+        "setpoint": float(setpoint_match.group("setpoint")) if setpoint_match else None,
+        "tank_size": float(tank_match.group("tank")) if tank_match else None,
+    }
+
+
+def format_case_title(filename):
+    """Return the human-readable case title used by both comparison plots."""
+    metadata = parse_case_filename(filename)
+    if metadata["case"] is None:
+        return Path(filename).stem
+
+    title = f"Case {metadata['case']}"
+    if metadata["hx"] is not None:
+        title += f" - {format_number(metadata['hx'])}% HX"
+    if metadata["pcm_loading"] is not None:
+        title += f" {format_number(metadata['pcm_loading'])}% PCM Loading"
+    return title
+
+
+def format_baseline_title(filename):
+    """Return baseline metadata to append to each generated plot title."""
+    stem = Path(filename).stem
+    parts = []
+    if re.search(r"no[_-]?pcm", stem, re.IGNORECASE):
+        parts.append("No PCM ")
+
+    setpoint_match = re.search(r"setpoint-(\d+(?:\.\d+)?)F", stem, re.IGNORECASE)
+    tank_match = re.search(r"(\d+(?:\.\d+)?)gal", stem, re.IGNORECASE)
+    if setpoint_match:
+        parts.append(f"Setpoint: {format_number(setpoint_match.group(1))}°F ")
+    if tank_match:
+        parts.append(f"Tank Size: {format_number(tank_match.group(1))} gal")
+    return "| ".join(parts) or Path(filename).name
+
+
+def format_baseline_filename(filename):
+    """Return concise baseline tank/setpoint metadata for PNG filenames."""
+    stem = Path(filename).stem
+    setpoint_match = re.search(r"setpoint-(\d+(?:\.\d+)?)F", stem, re.IGNORECASE)
+    tank_match = re.search(r"(\d+(?:\.\d+)?)gal", stem, re.IGNORECASE)
+    parts = []
+    if re.search(r"no[_-]?pcm", stem, re.IGNORECASE):
+        parts.append("No PCM")
+    if tank_match:
+        parts.append(f"Tank {format_number(tank_match.group(1))}gal")
+    if setpoint_match:
+        parts.append(f"Setpoint {format_number(setpoint_match.group(1))}F")
+    return "Baseline " + " ".join(parts) if parts else "Baseline"
+
+
+def _safe_plot_filename(value):
+    """Make a title safe to use as a Windows or POSIX filename."""
+    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(value))
+    return re.sub(r"\s+", " ", value).strip().rstrip(".") or "comparison"
+
+
+def save_comparison_figures(
+    figures,
+    case_title,
+    output_folder,
+    scale=4,
+    case_setpoint=None,
+    baseline_filename=None,
+):
+    """Save comparison figures as high-resolution PNG files.
+
+    Plotly uses the figure's layout dimensions multiplied by ``scale`` for
+    the exported image. With the current 800-pixel layout, the default scale
+    of 4 produces a 3200-pixel-wide PNG.
+    """
+    if scale <= 0:
+        raise ValueError("PNG image scale must be greater than zero")
+
+    try:
+        from importlib.metadata import version
+        from packaging.version import Version
+
+        plotly_version = Version(version("plotly"))
+        kaleido_version = Version(version("kaleido"))
+    except Exception as exc:
+        raise RuntimeError(
+            "PNG export requires Plotly and Kaleido. Install them with "
+            "`python -m pip install --upgrade 'plotly>=6.1.1' 'kaleido>=1.0.0'`."
+        ) from exc
+
+    if plotly_version < Version("6.1.1") or kaleido_version < Version("1.0.0"):
+        raise RuntimeError(
+            "PNG export requires Plotly >= 6.1.1 and Kaleido >= 1.0.0 "
+            f"(found Plotly {plotly_version}, Kaleido {kaleido_version}). "
+            "Upgrade with `python -m pip install --upgrade 'plotly>=6.1.1' 'kaleido>=1.0.0'`."
+        )
+
+    output_folder = Path(output_folder).expanduser()
+    output_folder.mkdir(parents=True, exist_ok=True)
+    filename_parts = [case_title]
+    if case_setpoint is not None:
+        filename_parts.append(f"Graph Setpoint {format_number(case_setpoint)}F")
+    if baseline_filename is not None:
+        filename_parts.append(format_baseline_filename(baseline_filename))
+    safe_case_title = _safe_plot_filename(" - ".join(filename_parts))
+    labels = {"water": "FHR", "first_draw": "Initial Draw"}
+    saved_files = {}
+
+    for key, label in labels.items():
+        figure = figures.get(key)
+        if figure is None:
+            continue
+
+        output_path = output_folder / f"{safe_case_title} - {label}.png"
+        print(f"Saving PNG: {output_path}")
+        export_start = time.perf_counter()
+        try:
+            figure.write_image(str(output_path), format="png", scale=scale)
+        except Exception as exc:
+            raise RuntimeError(
+                f"PNG export failed for {output_path}: {exc}. "
+                "Install the Kaleido package with `pip install kaleido` "
+                "and ensure it is available to this Python environment."
+            ) from exc
+        saved_files[key] = str(output_path)
+        print(f"Saved PNG: {output_path} ({time.perf_counter() - export_start:.2f}s)")
+
+    return saved_files
+
+
+def load_comparison_data(case_folder, baseline_file):
+    """Load all CSV case files and the explicitly selected baseline CSV."""
+    case_folder = Path(case_folder).expanduser().resolve()
+    if not case_folder.is_dir():
+        raise NotADirectoryError(f"Case folder does not exist: {case_folder}")
+
+    baseline_path = Path(baseline_file).expanduser()
+    if not baseline_path.is_file():
+        baseline_path = case_folder / baseline_path
+    baseline_path = baseline_path.resolve()
+    if not baseline_path.is_file():
+        raise FileNotFoundError(f"Baseline CSV does not exist: {baseline_file}")
+
+    case_paths = sorted(
+        path
+        for path in case_folder.iterdir()
+        if path.is_file()
+        and path.suffix.lower() == ".csv"
+        and path.resolve() != baseline_path
+    )
+    if not case_paths:
+        raise ValueError(f"No case CSV files found in {case_folder}")
+
+    paths = case_paths + [baseline_path]
+    return {path.name: pd.read_csv(path) for path in paths}
+
+
+def process_single_folder(
+    case_folder,
+    baseline_file,
+    *,
+    show=TRUE,
+    plot_output_folder=None,
+    image_scale=4,
+):
+    """Run one automated comparison for a case folder and a baseline CSV."""
+    total_start = time.perf_counter()
+
+    load_start = time.perf_counter()
+    dfs = load_comparison_data(case_folder, baseline_file)
+    load_seconds = time.perf_counter() - load_start
+
+    baseline_name = Path(baseline_file).name
+    case_files = [name for name in dfs if name != baseline_name]
+    first_case = case_files[0]
+    case_metadata = parse_case_filename(first_case)
+
+    calculation_start = time.perf_counter()
     outputs = calculate_hot_water_delivered(dfs, first_hour_test=True)
-    # plot_draw_event_summary(output)
-    # plot_draw_events(output)
-    plot_2d_comparison_generic(dfs, outputs, "sa_ratio", "h (W/m^2K)", setpoint, pcm_temp, tank_type, tank_size)
-    
-    # output and save to disk the variables dfs and outputs to load into different notebooks
-     
-    dfs_file = 'dfs.pickle'
-    outputs_file = 'outputs.pickle'
-    
-    # drop all but the first row of the dataframes 
-    
-    dfs_new = dfs.copy()
-    for key in dfs.keys():
-        dfs_new[key] = dfs[key].iloc[0:1]
-        
-    with open(dfs_file, 'wb') as f:
-        pickle.dump(dfs_new, f)
-    
-    with open(outputs_file, 'wb') as f:
-        pickle.dump(outputs, f) 
-    
-    print(f"✅ Finished processing setpoint={setpoint}F with pcm_temp={pcm_temp}F for tank type {tank_type} at {tank_size}gal in {output_folder}")
-    
-def process_output_folder(output_folder):
-    """Process all sub-folders (setpoints) in one output folder sequentially.
-       This function is intended to be run within a process for one output folder.
-    """
-    # Get only the directories from the output folder
-    folders = [f for f in os.listdir(output_folder)
-               if os.path.isdir(os.path.join(output_folder, f))]
-    print(f"Processing folders in {output_folder}: {folders}")
-    
-    for folder in folders:
-        process_single_folder(output_folder, folder)
+    calculation_seconds = time.perf_counter() - calculation_start
 
-def get_output_folders(root_dir):
-    """
-    Returns a list of all folder paths under root_dir (recursive) using os.walk.
-    """
-    root = Path(root_dir)
-    leafs = []
+    plot_start = time.perf_counter()
+    plot_result = plot_2d_comparison_generic(
+        dfs,
+        outputs,
+        "sa_ratio",
+        "h (W/m^2K)",
+        setpoint=case_metadata["setpoint"],
+        tank_size=case_metadata["tank_size"],
+        baseline_file=baseline_name,
+        case_title=format_case_title(first_case),
+        baseline_title=format_baseline_title(baseline_name),
+        show=show,
+        save_folder=(
+            Path(plot_output_folder).expanduser()
+            if plot_output_folder is not None
+            else Path(case_folder).expanduser().resolve() / "plots"
+        ),
+        image_scale=image_scale,
+    )
+    plot_seconds = time.perf_counter() - plot_start
+    total_seconds = time.perf_counter() - total_start
 
-    # 1) if root itself has no subdirs, include it
-    if root.is_dir() and not any(child.is_dir() for child in root.iterdir()):
-        if "no_shift" not in root.name:
-            leafs.append(str(root))
+    if plot_result is None:
+        print("Comparison finished, but no plot result was returned; no PNGs were saved.")
+    elif not plot_result.get("saved_files"):
+        print("Comparison finished, but no figures contained exportable data; no PNGs were saved.")
 
-    # 2) now scan descendants
-    for p in root.rglob('*'):
-        if p.is_dir():
-            if not any(child.is_dir() for child in p.iterdir()):
-                if "no_shift" not in p.parts:
-                    leafs.append(str(p))
+    print(
+        "Timing: "
+        f"loaded {len(dfs)} CSVs in {load_seconds:.2f}s; "
+        f"calculated metrics in {calculation_seconds:.2f}s; "
+        f"generated/exported plots in {plot_seconds:.2f}s; "
+        f"total {total_seconds:.2f}s"
+    )
+    print(f"Finished comparison for {case_folder} against {baseline_name}")
+    return {
+        "dfs": dfs,
+        "outputs": outputs,
+        "plot": plot_result,
+        "timing": {
+            "load_seconds": load_seconds,
+            "calculation_seconds": calculation_seconds,
+            "plot_seconds": plot_seconds,
+            "total_seconds": total_seconds,
+        },
+    }
 
-    return leafs
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Create 2-D comparison plots for a folder of case CSV files."
+    )
+    parser.add_argument("case_folder", type=Path, help="Folder containing the case CSV files")
+    parser.add_argument("baseline_file", type=Path, help="Baseline CSV path or filename")
+    parser.add_argument("--no-show", action="store_true", help="Build figures without opening Plotly windows")
+    parser.add_argument(
+        "--plot-output",
+        type=Path,
+        default=None,
+        help="Output folder for PNGs (default: <case_folder>/plots)",
+    )
+    parser.add_argument(
+        "--image-scale",
+        type=int,
+        default=4,
+        help="PNG resolution multiplier (default: 4)",
+    )
+    args = parser.parse_args(argv)
+
+    if args.image_scale < 1:
+        parser.error("--image-scale must be at least 1")
+
+    process_single_folder(
+        args.case_folder,
+        args.baseline_file,
+        show=not args.no_show,
+        plot_output_folder=args.plot_output,
+        image_scale=args.image_scale,
+    )
+
 
 if __name__ == "__main__":
-    _start_time = time.perf_counter()
-    _start_time_plot_results = time.perf_counter()
-    
-    # base_path = "../OCHRE_output/results_electric_heatpump_FHR/40_50_65 Gal Tanks" 
-    base_path = "..\\OCHRE_output\\results_electric_heatpump_FHR_2\\40_50_65 Gal Tanks" 
-    output_folders = get_output_folders(base_path)
-    
-    # Use ProcessPoolExecutor to run tasks concurrently across multiple processes.
-    tasks = []
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        # Submit one task per subfolder in each output folder.
-        # Here, you can choose to submit either each folder as a separate process or each output folder.
-        # The following submits each folder individually.
-        for output_folder in output_folders:
-            # List subfolders within each output folder
-            folder = output_folder
-            tasks.append(executor.submit(process_single_folder, output_folder, folder))
-        
-        # Wait for all tasks to complete
-        concurrent.futures.wait(tasks)
-    
-    print(f"Plots created in {time.perf_counter() - _start_time_plot_results:.2f} seconds")
-    total_time = time.perf_counter() - _start_time
-    print(f"\nTotal execution time: {total_time:.2f} seconds")
-    
-    # # Combine all figures and metadata
-    # all_figures = pattern_figures + [outlet_temp_fig]
-    # all_metadata = pattern_metadata + [outlet_metadata]
-    
-    # # Save all plots
-    # # save_plots(all_figures, all_metadata)
-    
-    # # Show all figures
-    # for fig in all_figures:
-    #     fig.show()
-    
-    # # Print UEF values
-    # for file, value in uef_values.items():
-    #     print(f"UEF for {file}:\t {value:.3f}")
+    main()

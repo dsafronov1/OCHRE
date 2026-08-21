@@ -333,8 +333,8 @@ class TankWithMultiPCM(StratifiedWaterModel):
                         length / (self.pcm_properties["solid"]["pcm_conductivity"] * effective_area * pcm_frac)
                     )
 
-            # PCM-AMB thermal resistance (K/W) - arbitrarily high
-            res[(f"PCM{node}", "AMB")] = 200000.0
+            # # PCM-AMB thermal resistance (K/W) - arbitrarily high
+            # res[(f"PCM{node}", "AMB")] = 200000.0
 
             self.pcm_node_properties[node] = {
                 "volume[L]": pcm_volume_L,
@@ -951,7 +951,7 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         pcm_specific_heats = np.interp(t_pcm, self.key_temp, self.key_specific_heats)
 
         # Loop over each PCM node and apply the modifications
-        # self.water_side_film_h = self.calculate_film_convective_heat_transfer_coefficient(states, current_schedule)
+        self.water_side_film_h = self.calculate_film_convective_heat_transfer_coefficient()[0]
         A_layer = self.internal_area_m2 / self.n_nodes
         film_conv_resistance = 1 / (self.water_side_film_h * A_layer)
 
@@ -1110,11 +1110,6 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
             raise ValueError("tank_height_m and tank_radius_m must be > 0")
         A_cs = np.pi * r * r
 
-        # Near-wall sweep baseline for mixed convection (vertical wall)
-        gamma_w = float(getattr(self, "mixed_conv_wall_sweep_factor", 0.3))
-        gamma_w = float(np.clip(gamma_w, 0.05, 1.5))
-
-        # ---------- node temperatures ----------
         T_fluid_C = _ensure_C(self.states[self.t_wh_idx])
         T_wall_C = (
             _ensure_C(self.states[self.t_en_idx])
@@ -1127,32 +1122,46 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
             h_default = float(getattr(self, "water_side_film_h", 10.0))
             return np.array([h_default], dtype=float)
 
-        # Trim & convert
         T_fluid_C = T_fluid_C[:n_nodes]
         T_wall_C = T_wall_C[:n_nodes]
-        T_fluid_K = _to_K(T_fluid_C)
-        T_wall_K = _to_K(T_wall_C)
-        dT = T_wall_K - T_fluid_K  # sign used only for heat-flux direction outside; |dT| for Nu
 
-        # ---------- properties at mean fluid T ----------
-        T_mean_C = float(np.nanmean(T_fluid_C))
-        rho_mean, mu, k_f, cp, Pr_f = water_props_C(T_mean_C)
-        nu_f = mu / max(rho_mean, 1e-12)
+        T_fluid_bulk_C = float(np.nanmean(T_fluid_C))
+        T_wall_bulk_C = float(np.nanmean(T_wall_C))
+        T_film_C = 0.5 * (T_fluid_bulk_C + T_wall_bulk_C)
+        dT_bulk = abs(T_wall_bulk_C - T_fluid_bulk_C)
+
+        rho_f, mu_f, k_f, cp_f, Pr_f = water_props_C(T_film_C)
+        nu_f = mu_f / max(rho_f, 1e-12)
+        _, beta_f = water_density_and_beta_lut(T_film_C)
+
         g = 9.81
+        Ra_L = g * beta_f * dT_bulk * (L ** 3) * Pr_f / max(nu_f ** 2, 1e-24)
 
-        # water beta_z using LUT-based density slope
-        rho_nodes, beta_z = water_density_and_beta_lut(T_fluid_C)  # beta_z is per node
+        if dT_bulk <= 1e-9 or beta_f <= 0.0:
+            Nu_nat_bulk = 1.0
+        else:
+            Nu_nat_bulk = (
+                0.825
+                + (0.387 * max(Ra_L, 1e-30) ** (1.0 / 6.0))
+                / ((1.0 + (0.492 / max(Pr_f, 1e-12)) ** (9.0 / 16.0)) ** (8.0 / 27.0))
+            ) ** 2
+            Nu_nat_bulk = max(Nu_nat_bulk, 1.0)
 
-        # ---------- draw rate → velocity ----------
+        h_nat_bulk = Nu_nat_bulk * k_f / L
+
         Q_draw_val = float(max(getattr(self, "draw_total", 0.0), 0.0))
         units = getattr(self, "draw_total_units", None)
+
         if isinstance(units, str) and units.lower() in ("l/min", "lpm", "l per min", "l_per_min"):
             Q_draw_m3s = Q_draw_val / 1000.0 / 60.0
         else:
             Q_draw_m3s = Q_draw_val / 1000.0 / 60.0 if Q_draw_val > 1.0 else Q_draw_val
+
         U_mean = Q_draw_m3s / max(A_cs, 1e-12)
 
-        # Optional per-node factor for near-wall sweep
+        gamma_w = float(getattr(self, "mixed_conv_wall_sweep_factor", 0.3))
+        gamma_w = float(np.clip(gamma_w, 0.05, 1.5))
+
         u_scale = getattr(self, "u_wall_factor_by_node", None)
         if u_scale is None:
             u_scale = np.ones(n_nodes, dtype=float)
@@ -1163,32 +1172,22 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
             u_scale = np.clip(u_scale, 0.0, 5.0)
 
         U_wall_node = gamma_w * U_mean * u_scale
-        Re_L_node = U_wall_node * L_node / max(nu_f, 1e-12)
+        Re_L_node = U_wall_node * L / max(nu_f, 1e-12)
 
-        # top and bottom walls ignored
-        # ---------- natural convection (vertical wall) PER NODE ----------
-        C_lam = 0.671 / (1.0 + (0.492 / max(Pr_f, 1e-12)) ** 0.5625) ** 0.444
-        Ra_side = g * beta_z * np.abs(dT) * (L_node**3) / (max(nu_f, 1e-12) ** 2) * Pr_f
-        Ra_quarter = np.maximum(Ra_side, 1e-30) ** 0.25
-        Nu_nat = 2.0 / np.log(np.maximum(1.0 + 2.0 / np.maximum(C_lam * Ra_quarter, 1.0e-30), 1.0 + 1.0e-12))
-        Nu_nat = np.maximum(Nu_nat, 1.0)  # conduction floor
-
-        # ---------- forced convection (vertical plate) PER NODE ----------
         Pr13 = Pr_f ** (1.0 / 3.0)
         Nu_forced = np.where(
             Re_L_node < 5.0e5,
             0.664 * np.sqrt(np.maximum(Re_L_node, 0.0)) * Pr13,
             np.maximum(0.037 * (np.maximum(Re_L_node, 0.0) ** 0.8) * Pr13 - 871.0 * Pr13, 0.0),
         )
+
         if Q_draw_m3s <= 0.0:
             Nu_forced[:] = 0.0
 
-        # ---------- mixed convection PER NODE ----------
-        n_blend = 3.0
-        Nu_tot = (Nu_forced**n_blend + Nu_nat**n_blend) ** (1.0 / n_blend)
+        h_forced_node = Nu_forced * k_f / L
 
-        # ---------- h per node ----------
-        h_z = Nu_tot * k_f / L_node
+        n_blend = 3.0
+        h_z = (h_forced_node ** n_blend + h_nat_bulk ** n_blend) ** (1.0 / n_blend)
 
         if hasattr(self, "water_side_film_h") and self.water_side_film_h is not None:
             href = float(self.water_side_film_h)
@@ -1199,6 +1198,9 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
         h_z = np.clip(h_z, 1e-6, 1e6)
 
         return h_z
+
+
+
 
     def update_inputs(self, schedule_inputs=None):
         # Note: self.inputs_init are not updated here, only self.current_schedule
@@ -1230,6 +1232,138 @@ class TankWithMultiPCMExternal(StratifiedWaterModel):
     #     self.next_states[self.t_pcm_idx] = t_pcm
     #     self.update_state_space_model()
 
+    def update_water_draw(self):
+        heats_to_model = np.zeros(self.nx)
+        self.mains_temp = self.current_schedule.get("Mains Temperature (C)")
+        self.outlet_temp = self.states[self.t_1_idx]  # initial outlet temp, for estimating draw volume
+        self.draw_tempered_temperature = self.outlet_temp
+
+        # Note: removing target draw temperature for clothes washers, not implemented in ResStock
+        draw_tempered = self.current_schedule.get("Water Fixtures (L/min)", 0)
+        draw_hot = self.current_schedule.get("Clothes Washer (L/min)", 0) + self.current_schedule.get(
+            "Dishwasher (L/min)", 0
+        )
+        #    # Specify the CSV file name
+        #csv_file = "water_heating_values.csv"
+		#
+        ## Append the current value to the CSV file
+        #with open(csv_file, mode="a", newline="") as file:
+        #    writer = csv.writer(file)
+        #    writer.writerow([draw_hot])  # Write timestep and value
+
+        # draw_cw = self.current_schedule.get('Clothes Washer (L/min)', 0)
+        # draw_hot = self.current_schedule.get('Dishwasher (L/min)', 0)
+        if not (draw_tempered + draw_hot):
+            # No water draw
+            self.draw_total = 0
+            self.draw_tempered = 0
+            self.h_delivered = 0
+            self.h_unmet_load = 0
+            return heats_to_model
+
+        if self.mains_temp is None:
+            raise ModelException("Mains temperature required when water draw exists")
+
+        # calculate total draw volume from tempered draw volume(s)
+        # for tempered draw, assume outlet temperature == T1, slightly off if the water draw is very large
+        if self.tempered_draw_temp < self.setpoint_temp:
+            if self.outlet_temp <= self.hot_draw_temp:
+                self.draw_total = draw_hot
+                self.draw_tempered_temperature = self.outlet_temp
+            else:
+                vol_ratio_hot = (self.hot_draw_temp - self.mains_temp) / (self.outlet_temp - self.mains_temp)
+                self.draw_total = draw_hot * vol_ratio_hot
+                self.draw_tempered_temperature = self.tempered_draw_temp
+        else:
+            self.draw_total = draw_hot
+
+        if draw_tempered:
+            self.draw_tempered = draw_tempered
+            if self.outlet_temp <= self.tempered_draw_temp:
+                self.draw_total += draw_tempered
+                self.draw_tempered_temperature = self.outlet_temp
+            else:
+                vol_ratio = (self.tempered_draw_temp - self.mains_temp) / (self.outlet_temp - self.mains_temp)
+                self.draw_total += draw_tempered * vol_ratio
+                self.draw_tempered_temperature = self.tempered_draw_temp
+                # self.draw_total += draw_tempered
+        # if draw_cw:
+        #     if self.outlet_temp <= self.washer_draw_temp:
+        #         self.draw_total += draw_cw
+        #     else:
+        #         vol_ratio = (self.washer_draw_temp - self.mains_temp) / (self.outlet_temp - self.mains_temp)
+        #         self.draw_total += draw_cw * vol_ratio
+
+        t_s = self.time_res.total_seconds()
+        draw_liters = self.draw_total * t_s / 60  # in liters
+        draw_fraction = draw_liters / self.volume  # unitless
+        water_temps = self.states[:self.n_nodes]  # cuts off PCM, other non-water nodes
+
+        # csv_draw = "draw_tempered_values.csv"
+
+        # # Append the current value to the CSV file
+        # with open(csv_draw, mode="a", newline="") as draw_file:
+        #     writer = csv.writer(draw_file)
+        #     writer.writerow([draw_tempered])  # Write timestep and value
+
+        if self.n_nodes == 2 and draw_fraction < self.vol_fractions[1]:
+            # Use empirical factor for determining water flow by node
+            flow_fraction = 0.95  # Totally empirical factor based on detailed lab validation
+            if draw_fraction > self.vol_fractions[0]:
+                # outlet temp is volume-weighted average of lower and upper temps
+                self.outlet_temp = (
+                    self.states[0] * self.vol_fractions[0] + self.states[1] * (draw_fraction - self.vol_fractions[0])
+                ) / draw_fraction
+            q_delivered = draw_liters * water_c * (self.outlet_temp - self.mains_temp)  # in J
+
+            # q_to_mains_upper = self.state_capacitances[0] * (self.x[0] - self.mains_temp)
+            q_to_mains_lower = self.capacitances[1] * (water_temps[1] - self.mains_temp)
+            if q_delivered * flow_fraction > q_to_mains_lower:
+                # If you'd fully cool the bottom node to mains, set bottom node to mains and cool top node
+                q_nodes = np.array([q_to_mains_lower - q_delivered, -q_to_mains_lower])
+            else:
+                q_nodes = np.array([-q_delivered * (1 - flow_fraction), -q_delivered * flow_fraction])
+
+        else:
+            if draw_fraction < min(self.vol_fractions):
+                # water draw is smaller than all node volumes
+                q_delivered = draw_liters * water_c * (self.outlet_temp - self.mains_temp)  # in J
+                # all volume transfers are from the node directly below
+                q_nodes = draw_liters * water_c * np.diff(water_temps, append=self.mains_temp)  # in J
+            else:
+                # calculate volume transfers to/from each node, including q_delivered
+                vols_pre = np.append(self.vol_fractions, draw_fraction).cumsum()
+                vols_post = np.insert(self.vol_fractions, 0, draw_fraction).cumsum()
+                temps = np.append(water_temps, self.mains_temp)
+
+                # update outlet temp as a weighted average of temps, by volume
+                vols_delivered = np.diff(vols_pre.clip(max=draw_fraction), prepend=0)
+                self.outlet_temp = np.dot(temps, vols_delivered) / draw_fraction
+                q_delivered = draw_liters * water_c * (self.outlet_temp - self.mains_temp)  # in J
+
+                # calculate heat in/out of each node (in J)
+                q_nodes = []
+                for i in range(self.n_nodes):
+                    t_start = temps[i]
+                    vols_delivered = np.diff(
+                        vols_pre.clip(min=vols_post[i], max=vols_post[i + 1]), prepend=vols_post[i]
+                    )
+                    t_end = np.dot(temps, vols_delivered) / self.vol_fractions[i]
+                    q_nodes.append((t_end - t_start) * self.capacitances[i])
+                q_nodes = np.array(q_nodes)
+
+        # convert heat transfer from J to W
+        self.h_delivered = q_delivered / t_s
+        if "pcm" in self.name.lower():
+            heats_to_model[:self.n_nodes] += q_nodes / t_s
+        else:
+            heats_to_model += q_nodes / t_s
+
+        # calculate unmet loads, fixtures only, in W
+        self.h_unmet_load = max(draw_tempered / 60 * water_c * (self.tempered_draw_temp - self.outlet_temp), 0)  # in W
+
+        return heats_to_model
+    
     def update_model(
         self,
         control_signal=None,

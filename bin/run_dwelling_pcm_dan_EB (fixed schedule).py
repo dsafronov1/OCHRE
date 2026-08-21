@@ -31,7 +31,6 @@ for vol_fract in vol_fracs:
 DEFAULT_PCM_PROPERTIES = {
 "h": 200,  # W/m^2K
 "sa_ratio": 3, # m^2/m^3 of total pcm heat exchanger volume
-"h_conv": 2000,  # W/m^2-K, accounts for surface area (ha)
 "solid": {
     "pcm_density": 0.904,  # g/cm^3
     "pcm_cp": 0.6,  # J/g-C # adjusted by real measurements average from 0-45c
@@ -125,17 +124,17 @@ dwelling_args = {
         #         'save_results': True,
         #     },
         # },
-        # 'Heat Pump Water Heater': {
-        #     'HPWH COP (-)': 4.5,
-        #     'Tank Volume (L)': 40 * 3.78541,
-        #     'hp_only_mode': True,
-        #     "model_class": TankWithMultiPCM,
-        #     "Setpoint Temperature (C)": 60,
-        #     "Water Tank": {
-        #         "pcm_node_vol_fractions": pcm_vol_fractions[0],
-        #         "pcm_properties": DEFAULT_PCM_PROPERTIES,
-        #     },
-        # },
+        'Heat Pump Water Heater': {
+            'HPWH COP (-)': 4.5,
+            'Tank Volume (L)': 40 * 3.78541,
+            'hp_only_mode': True,
+            "model_class": TankWithMultiPCM,
+            "Setpoint Temperature (C)": 60,
+            "Water Tank": {
+                "pcm_node_vol_fractions": pcm_vol_fractions[0],
+                "pcm_properties": DEFAULT_PCM_PROPERTIES,
+            },
+        },
         # 'Heat Pump Water Heater': {
         #     'HPWH COP (-)': 4.5,
         #     'Tank Volume (L)': 40 * 3.78541,

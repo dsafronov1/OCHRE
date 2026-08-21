@@ -57,7 +57,7 @@ DEFAULT_PCM_PROPERTIES = {
         # "pcm_c": 1823.8,  # J/m**3-C, not used
     },
     "enthalpy_lut": "85wt-pt60-EG_h-T_data_48C.csv",
-    "film_h": 50,
+    "film_h": None,
     "external_pcm_thickness_in": 1,
     "pcm_segment_thickness_inches": 1
 }
@@ -93,7 +93,7 @@ setpoint_temps_c = [
 
 films_h = [150]
 # pcms_thickness_in = [0.001,0.1,0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
-pcms_thickness_in = [0.28, 0.51, 0.74, 0.97, 1.2]
+pcms_thickness_in = [1.2]
 pcms_segment_thickness_inches = [0.17]
 # pcms_segment_thickness_inches = [1.2]
 
@@ -710,8 +710,8 @@ def run_water_heater_electric(default_args, setpoint_temp, tank_volume):
         "water_nodes": 12,
         "duration": duration,
         **default_args,
-        # "time_res": dt.timedelta(minutes=1),
-        "time_res": dt.timedelta(seconds=0.5),
+        "time_res": dt.timedelta(minutes=1),
+        # "time_res": dt.timedelta(seconds=0.5),
     }
 
     # Initialize equipment
