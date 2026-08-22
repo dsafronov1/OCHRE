@@ -113,15 +113,14 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
                         'max_temp': temp_C,
                         'min_temp': temp_C,
                         'max_flow_rate': flow_L_per_min,
-                        'temp_readings': [] if first_hour_test else None,
+                        'temp_readings': [],
                     }
                 # update envelope
                 current_event['end_time']      = timestamp
                 current_event['max_flow_rate'] = max(current_event['max_flow_rate'], flow_L_per_min)
                 current_event['max_temp']      = max(current_event['max_temp'], temp_C)
                 current_event['min_temp']      = min(current_event['min_temp'], temp_C)
-                if first_hour_test:
-                    current_event['temp_readings'].append(temp_C)
+                current_event['temp_readings'].append(temp_C)
 
                 # only count when outlet >= cutoff
                 if temp_C >= water_temp_cutoff and dt > 0:
@@ -137,7 +136,7 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
                 if current_event and current_event['water_volume_L'] > 0:
                     current_event['water_volume_gal']   = current_event['water_volume_L'] * L_TO_GAL_RATIO
                     current_event['heat_delivered_kWh'] = current_event['heat_delivered_J'] * 2.77778e-7
-                    if first_hour_test and current_event['temp_readings']:
+                    if current_event['temp_readings']:
                         current_event['avg_temp'] = sum(current_event['temp_readings']) / len(current_event['temp_readings'])
                     if is_pcm:
                         current_event['pcm_enthalpy'] = enthalpy
@@ -152,7 +151,7 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
         if is_draw_active and current_event and current_event['water_volume_L'] > 0:
             current_event['water_volume_gal']   = current_event['water_volume_L'] * L_TO_GAL_RATIO
             current_event['heat_delivered_kWh'] = current_event['heat_delivered_J'] * 2.77778e-7
-            if first_hour_test and current_event['temp_readings']:
+            if current_event['temp_readings']:
                 current_event['avg_temp'] = sum(current_event['temp_readings']) / len(current_event['temp_readings'])
             if is_pcm:
                 current_event['pcm_enthalpy'] = enthalpy
@@ -185,7 +184,9 @@ def _process_core(file_key, df, first_hour_test, water_temp_cutoff=43.333, L_TO_
                     total_water_volume_L   = total_water_volume_gal / 0.264172
             else:
                 first_hour_test = False
-
+        elif not first_hour_test:
+            total_water_volume_gal = 0.0
+            total_water_volume_L = 0.0
 
         # PCM tail metrics
         try:

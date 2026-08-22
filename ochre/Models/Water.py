@@ -134,29 +134,32 @@ class StratifiedWaterModel(RCModel):
 
     def update_water_draw(self):
         heats_to_model = np.zeros(self.nx)
+
         self.mains_temp = self.current_schedule.get("Mains Temperature (C)")
-        self.outlet_temp = self.states[self.t_1_idx]  # initial outlet temp, for estimating draw volume
-        self.draw_tempered_temperature = self.outlet_temp
 
-        # Note: removing target draw temperature for clothes washers, not implemented in ResStock
+        # Initial outlet temperature, used for estimating tank-side draw volume.
+        self.outlet_temp = self.states[self.t_1_idx]
+
+        # Scheduled values are total fixture-side / valve-side flow rates.
         draw_tempered = self.current_schedule.get("Water Fixtures (L/min)", 0)
-        draw_hot = self.current_schedule.get("Clothes Washer (L/min)", 0) + self.current_schedule.get(
-            "Dishwasher (L/min)", 0
-        )
-        #    # Specify the CSV file name
-        #csv_file = "water_heating_values.csv"
-		#
-        ## Append the current value to the CSV file
-        #with open(csv_file, mode="a", newline="") as file:
-        #    writer = csv.writer(file)
-        #    writer.writerow([draw_hot])  # Write timestep and value
+        draw_hot = (self.current_schedule.get("Clothes Washer (L/min)", 0) + self.current_schedule.get("Dishwasher (L/min)", 0))
 
-        # draw_cw = self.current_schedule.get('Clothes Washer (L/min)', 0)
-        # draw_hot = self.current_schedule.get('Dishwasher (L/min)', 0)
-        if not (draw_tempered + draw_hot):
-            # No water draw
-            self.draw_total = 0
-            self.draw_tempered = 0
+        # Total fixture-side water output, including any cold water mixed in.
+        self.draw_total = draw_hot + draw_tempered
+
+        # Tank-side components.
+        self.draw_hot = 0
+        self.draw_tempered = 0
+        self.draw_tank = 0
+
+        # Temperatures default to the tank outlet temperature.
+        self.draw_hot_temperature = self.outlet_temp
+        self.draw_tempered_temperature = self.outlet_temp
+        self.draw_tank_temperature = self.outlet_temp
+        self.draw_total_temperature = self.outlet_temp
+
+        if not self.draw_total:
+            # No water draw.
             self.h_delivered = 0
             self.h_unmet_load = 0
             return heats_to_model
@@ -164,107 +167,169 @@ class StratifiedWaterModel(RCModel):
         if self.mains_temp is None:
             raise ModelException("Mains temperature required when water draw exists")
 
-        # calculate total draw volume from tempered draw volume(s)
-        # for tempered draw, assume outlet temperature == T1, slightly off if the water draw is very large
-        if self.tempered_draw_temp < self.setpoint_temp:
-            self.draw_hot = draw_hot
+        # -------------------------------------------------------------------------
+        # Determine tank-side portion of the "hot" draw.
+        #
+        # draw_hot is the requested fixture-side flow.
+        # self.draw_hot is the portion that must actually come from the tank.
+        # -------------------------------------------------------------------------
+        if draw_hot:
             if self.outlet_temp <= self.hot_draw_temp:
-                self.draw_total = draw_hot
-                self.draw_tempered_temperature = self.outlet_temp
+                # Tank is not hotter than the requested delivery temperature.
+                # No cold water can be mixed in.
+                self.draw_hot = draw_hot
             else:
                 vol_ratio_hot = (self.hot_draw_temp - self.mains_temp) / (self.outlet_temp - self.mains_temp)
-                self.draw_total = draw_hot * vol_ratio_hot
-                self.draw_tempered_temperature = self.tempered_draw_temp
-        else:
-            self.draw_total = draw_hot
 
+                vol_ratio_hot = np.clip(vol_ratio_hot, 0, 1)
+
+                self.draw_hot = draw_hot * vol_ratio_hot
+
+        # -------------------------------------------------------------------------
+        # Determine tank-side portion of the tempered fixture draw.
+        #
+        # draw_tempered is the requested fixture-side flow.
+        # self.draw_tempered is the portion that must actually come from the tank.
+        # -------------------------------------------------------------------------
         if draw_tempered:
-            self.draw_tempered = draw_tempered
             if self.outlet_temp <= self.tempered_draw_temp:
-                self.draw_total += draw_tempered
-                self.draw_tempered_temperature = self.outlet_temp
+                # Tank is not hotter than the requested delivery temperature.
+                # No cold water can be mixed in.
+                self.draw_tempered = draw_tempered
             else:
-                vol_ratio = (self.tempered_draw_temp - self.mains_temp) / (self.outlet_temp - self.mains_temp)
-                self.draw_total += draw_tempered * vol_ratio
-                self.draw_tempered_temperature = self.tempered_draw_temp
-                # self.draw_total += draw_tempered
-        # if draw_cw:
-        #     if self.outlet_temp <= self.washer_draw_temp:
-        #         self.draw_total += draw_cw
-        #     else:
-        #         vol_ratio = (self.washer_draw_temp - self.mains_temp) / (self.outlet_temp - self.mains_temp)
-        #         self.draw_total += draw_cw * vol_ratio
+                vol_ratio_tempered = (self.tempered_draw_temp - self.mains_temp) / (self.outlet_temp - self.mains_temp)
 
+                vol_ratio_tempered = np.clip(vol_ratio_tempered, 0, 1)
+
+                self.draw_tempered = draw_tempered * vol_ratio_tempered
+
+        # Combined water actually withdrawn from the tank.
+        self.draw_tank = self.draw_hot + self.draw_tempered
+
+        # -------------------------------------------------------------------------
+        # Tank thermal calculation must use tank-side flow, not total fixture flow.
+        # -------------------------------------------------------------------------
         t_s = self.time_res.total_seconds()
-        draw_liters = self.draw_total * t_s / 60  # in liters
-        draw_fraction = draw_liters / self.volume  # unitless
+
+        draw_liters = self.draw_tank * t_s / 60  # liters removed from tank
+        draw_fraction = draw_liters / self.volume
+
         water_temps = self.states[:self.n_nodes]  # cuts off PCM, other non-water nodes
 
-        # csv_draw = "draw_tempered_values.csv"
-
-        # # Append the current value to the CSV file
-        # with open(csv_draw, mode="a", newline="") as draw_file:
-        #     writer = csv.writer(draw_file)
-        #     writer.writerow([draw_tempered])  # Write timestep and value
-
         if self.n_nodes == 2 and draw_fraction < self.vol_fractions[1]:
-            # Use empirical factor for determining water flow by node
+            # Use empirical factor for determining water flow by node.
             flow_fraction = 0.95  # Totally empirical factor based on detailed lab validation
-            if draw_fraction > self.vol_fractions[0]:
-                # outlet temp is volume-weighted average of lower and upper temps
-                self.outlet_temp = (
-                    self.states[0] * self.vol_fractions[0] + self.states[1] * (draw_fraction - self.vol_fractions[0])
-                ) / draw_fraction
-            q_delivered = draw_liters * water_c * (self.outlet_temp - self.mains_temp)  # in J
 
-            # q_to_mains_upper = self.state_capacitances[0] * (self.x[0] - self.mains_temp)
-            q_to_mains_lower = self.capacitances[1] * (water_temps[1] - self.mains_temp)
+            if draw_fraction > self.vol_fractions[0]:
+                # Outlet temp is volume-weighted average of lower and upper temps.
+                self.outlet_temp = (self.states[0] * self.vol_fractions[0] + self.states[1] * (draw_fraction - self.vol_fractions[0])) / draw_fraction
+
+            q_delivered = (draw_liters * water_c * (self.outlet_temp - self.mains_temp))  # in J
+
+
+            q_to_mains_lower = (self.capacitances[1] * (water_temps[1] - self.mains_temp))
+
             if q_delivered * flow_fraction > q_to_mains_lower:
-                # If you'd fully cool the bottom node to mains, set bottom node to mains and cool top node
+                # If you'd fully cool the bottom node to mains, set bottom node
+                # to mains and cool top node.
                 q_nodes = np.array([q_to_mains_lower - q_delivered, -q_to_mains_lower])
             else:
                 q_nodes = np.array([-q_delivered * (1 - flow_fraction), -q_delivered * flow_fraction])
 
+
         else:
             if draw_fraction < min(self.vol_fractions):
-                # water draw is smaller than all node volumes
-                q_delivered = draw_liters * water_c * (self.outlet_temp - self.mains_temp)  # in J
-                # all volume transfers are from the node directly below
-                q_nodes = draw_liters * water_c * np.diff(water_temps, append=self.mains_temp)  # in J
+                # Water draw is smaller than all node volumes.
+                q_delivered = (draw_liters * water_c * (self.outlet_temp - self.mains_temp))  # in J
+
+                # All volume transfers are from the node directly below.
+                q_nodes = (draw_liters * water_c * np.diff(water_temps, append=self.mains_temp))  # in J
+
+
             else:
-                # calculate volume transfers to/from each node, including q_delivered
+                # Calculate volume transfers to/from each node,
+                # including q_delivered.
                 vols_pre = np.append(self.vol_fractions, draw_fraction).cumsum()
+
                 vols_post = np.insert(self.vol_fractions, 0, draw_fraction).cumsum()
+
                 temps = np.append(water_temps, self.mains_temp)
 
-                # update outlet temp as a weighted average of temps, by volume
+                # Update outlet temp as a weighted average of temperatures
+                # actually delivered from the tank.
                 vols_delivered = np.diff(vols_pre.clip(max=draw_fraction), prepend=0)
-                self.outlet_temp = np.dot(temps, vols_delivered) / draw_fraction
-                q_delivered = draw_liters * water_c * (self.outlet_temp - self.mains_temp)  # in J
 
-                # calculate heat in/out of each node (in J)
+
+                self.outlet_temp = (np.dot(temps, vols_delivered) / draw_fraction)
+                
+                q_delivered = (draw_liters * water_c * (self.outlet_temp - self.mains_temp))  # in J
+
+                # Calculate heat in/out of each node (in J).
                 q_nodes = []
+
                 for i in range(self.n_nodes):
                     t_start = temps[i]
-                    vols_delivered = np.diff(
-                        vols_pre.clip(min=vols_post[i], max=vols_post[i + 1]), prepend=vols_post[i]
-                    )
-                    t_end = np.dot(temps, vols_delivered) / self.vol_fractions[i]
+
+                    vols_delivered = np.diff(vols_pre.clip(min=vols_post[i], max=vols_post[i + 1]), prepend=vols_post[i])
+
+                    t_end = (np.dot(temps, vols_delivered) / self.vol_fractions[i])
+
                     q_nodes.append((t_end - t_start) * self.capacitances[i])
+
                 q_nodes = np.array(q_nodes)
 
-        # convert heat transfer from J to W
+        # -------------------------------------------------------------------------
+        # At this point self.outlet_temp represents the average temperature of
+        # water actually withdrawn from the tank for this timestep.
+        # -------------------------------------------------------------------------
+        self.draw_tank_temperature = self.outlet_temp
+
+        # -------------------------------------------------------------------------
+        # Determine actual delivered temperatures for each draw category.
+        #
+        # The cold portion is whatever part of the scheduled fixture flow did not
+        # come from the tank.
+        # -------------------------------------------------------------------------
+        if draw_hot:
+            draw_hot_cold = draw_hot - self.draw_hot
+
+            self.draw_hot_temperature = (self.draw_hot * self.draw_tank_temperature + draw_hot_cold * self.mains_temp) / draw_hot
+        else:
+            self.draw_hot_temperature = self.draw_tank_temperature
+
+        if draw_tempered:
+            draw_tempered_cold = draw_tempered - self.draw_tempered
+
+            self.draw_tempered_temperature = (self.draw_tempered * self.draw_tank_temperature + draw_tempered_cold * self.mains_temp) / draw_tempered
+        else:
+            self.draw_tempered_temperature = self.draw_tank_temperature
+
+        # -------------------------------------------------------------------------
+        # Calculate temperature of ALL delivered water.
+        #
+        # self.draw_total = tank water + mixed mains water
+        # -------------------------------------------------------------------------
+        draw_cold = self.draw_total - self.draw_tank
+
+        self.draw_total_temperature = (self.draw_tank * self.draw_tank_temperature + draw_cold * self.mains_temp) / self.draw_total
+
+        # Convert heat transfer from J to W.
         self.h_delivered = q_delivered / t_s
+
         if "pcm" in self.name.lower():
             heats_to_model[:self.n_nodes] += q_nodes / t_s
         else:
             heats_to_model += q_nodes / t_s
 
-        # calculate unmet loads, fixtures only, in W
-        self.h_unmet_load = max(draw_tempered / 60 * water_c * (self.tempered_draw_temp - self.outlet_temp), 0)  # in W
+        # Calculate unmet loads for tempered fixtures only, in W.
+        #
+        # Use the actual mixed fixture delivery temperature rather than the raw
+        # tank outlet temperature.
+        self.h_unmet_load = max(draw_tempered/ 60 * water_c * (self.tempered_draw_temp - self.draw_tempered_temperature), 0)  # in W
+
 
         return heats_to_model
-
+    
     def update_inputs(self, schedule_inputs=None):
         # Note: self.inputs_init are not updated here, only self.current_schedule
         super().update_inputs(schedule_inputs)
@@ -365,27 +430,42 @@ class StratifiedWaterModel(RCModel):
         return current_results
 
     def generate_results(self):
-        # Note: most results are included in Dwelling/WH. Only inputs and states are saved to self.results
+        # Note: most results are included in Dwelling/WH.
+        # Only inputs and states are saved to self.results.
         results = super().generate_results()
 
         if self.verbosity >= 3:
             results["Hot Water Unmet Demand (kW)"] = self.h_unmet_load / 1000
             results["Hot Water Outlet Temperature (C)"] = self.outlet_temp
+
         if self.verbosity >= 4:
-            results["Hot Water Delivered (L/min)"] = self.draw_total
+            # Actual water withdrawn from the water heater tank.
+            results["Hot Water Delivered (L/min)"] = self.draw_tank
+            results["Hot Water Delivered Temperature (C)"] = self.draw_tank_temperature
             results["Hot Water Delivered (W)"] = self.h_delivered
+
         if self.verbosity >= 7:
             results["Hot Water Heat Injected (W)"] = self.h_injections
-            results["Total Water Output Delivered (L/min)"] = self.draw_tempered
-            results["Total Water Output Delivered Temperature (C)"] = self.draw_tempered_temperature
+
+            # Total fixture/valve output, including cold water mixed with tank water.
+            results["Total Water Output Delivered (L/min)"] = self.draw_total
+            results["Total Water Output Delivered Temperature (C)"] = self.draw_total_temperature
+
             results["Hot Water Heat Loss (W)"] = self.h_loss
+
             if "pcm" in self.name.lower():
-                results["Hot Water Average Temperature (C)"] = self.states[:self.n_nodes].dot(self.vol_fractions)
+                results["Hot Water Average Temperature (C)"] = (
+                    self.states[:self.n_nodes].dot(self.vol_fractions)
+                )
             else:
-                results["Hot Water Average Temperature (C)"] = self.states.dot(self.vol_fractions)
+                results["Hot Water Average Temperature (C)"] = (
+                    self.states.dot(self.vol_fractions)
+                )
+
             results["Hot Water Maximum Temperature (C)"] = self.states.max()
             results["Hot Water Minimum Temperature (C)"] = self.states.min()
             results["Hot Water Mains Temperature (C)"] = self.mains_temp
+
         return results
 
 

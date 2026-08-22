@@ -9,6 +9,7 @@
   "image_scale": 4,
   "export_draw_outputs": true,
   "draw_outputs_csv": "../OCHRE_output/OCHRE_results/results_csv/results.csv",
+  "scenario_results_file": "scenario_results.csv",
   "append_results_csv": "../OCHRE_results/results_csv/results_FHR_ADJUSTMENT_PCM_PARMETRIC_LOW_CONDUCTIVITY.csv",
   "baseline_file": "../OCHRE_output/zDefault_No_PCM_HeatPump_setpoint-140F_50gal_2.csv",
   "tests": [
@@ -21,7 +22,7 @@
     {
       "test_type": "UEF",
       "duration_hours": 48,
-      "time_interval_seconds": 30,
+      "time_interval_seconds": 10,
       "load_profile": "MediumUseL.csv"
     }
   ],
@@ -747,7 +748,7 @@
       }
     },
     {
-      "name": "case13_0.72",
+      "name": "case13",
       "nodes": [
         4,
         5,
@@ -796,7 +797,7 @@
       }
     },
     {
-      "name": "case14_0.73",
+      "name": "case14",
       "nodes": [
         4,
         5,
@@ -845,7 +846,7 @@
       }
     },
     {
-      "name": "case15_0.70",
+      "name": "case15",
       "nodes": [
         4,
         5,
@@ -894,7 +895,7 @@
       }
     },
     {
-      "name": "case16_0.69",
+      "name": "case16",
       "nodes": [
         4,
         5,
@@ -943,7 +944,7 @@
       }
     },
     {
-      "name": "case17_0.65",
+      "name": "case17",
       "nodes": [
         4,
         5,
@@ -992,7 +993,7 @@
       }
     },
     {
-      "name": "case18_0.66",
+      "name": "case18",
       "nodes": [
         4,
         5,
@@ -1041,7 +1042,7 @@
       }
     },
     {
-      "name": "case19_0.64",
+      "name": "case19",
       "nodes": [
         4,
         5,
@@ -1090,7 +1091,7 @@
       }
     },
     {
-      "name": "case20_0.67",
+      "name": "case20",
       "nodes": [
         4,
         5,

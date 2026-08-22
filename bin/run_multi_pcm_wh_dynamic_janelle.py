@@ -214,7 +214,7 @@ pcm_file_names = ['CT53_90%_cp_h_T_data.csv']
 # pcm_file_names = ['ct53-resin_h-T_data_45frac.csv']
 
 # setpoint_temps_f = [140]
-setpoint_temps_f = [140]
+setpoint_temps_f = [125,140]
 setpoint_temps_c = [
     (setpoint_temp - 32) * (5 / 9) for setpoint_temp in setpoint_temps_f
 ]
@@ -343,6 +343,7 @@ DEFAULT_RUNNER_CONFIG = {
     "baseline_file": "../OCHRE_output/zDefault_No_PCM_HeatPump_setpoint-140F_40gal_0.csv",
     "export_draw_outputs": True,
     "draw_outputs_csv": "../OCHRE_output/OCHRE_results/results_csv/results.csv",
+    "scenario_results_file": "scenario_results.csv",
     "tests": DEFAULT_TESTS,
     "scenarios": [DEFAULT_SCENARIO],
 }
@@ -569,19 +570,113 @@ def scenario_folder_name(scenario):
     )
 
 
-SCENARIO_CACHE_VERSION = 2
+SCENARIO_CACHE_VERSION = 3
 SCENARIO_CACHE_FILE = ".scenario_cache.json"
+DEFAULT_SCENARIO_RESULTS_FILE = "scenario_results.csv"
 
 
-def scenario_cache_payload(scenario, run_default_no_pcm, no_pcm_type, tests=None):
-    """Return the decoded scenario configuration used to identify its cache."""
+def _utc_timestamp():
+    """Return a JSON-safe UTC timestamp for run metadata."""
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def _cache_identity(cache_payload):
+    """Return only the immutable fields that identify a scenario cache."""
     return {
+        "cache_version": cache_payload.get("cache_version"),
+        "scenario": cache_payload.get("scenario"),
+        "run_default_no_pcm": cache_payload.get("run_default_no_pcm"),
+        "default_no_pcm_type": cache_payload.get("default_no_pcm_type"),
+        "tests": cache_payload.get("tests"),
+    }
+
+
+def _task_cache_record(task):
+    """Return the durable metadata for one simulation task."""
+    simulation_args = task["args"]
+    return {
+        "filename": task["filename"],
+        "test_type": task["test_type"],
+        "tank_volume_gal": task["tank_volume"],
+        "setpoint_temp_c": task["setpoint_temp_c"],
+        "group": list(task["group"]),
+        "parameters": {
+            "name": simulation_args.get("name"),
+            "heater_type": (
+                "heatpump" if simulation_args.get("is_heatpump") else "electric"
+            ),
+            "duration_hours": simulation_args.get("_test_duration_hours"),
+            "time_interval_seconds": simulation_args.get(
+                "_test_time_interval_seconds"
+            ),
+            "load_profile": simulation_args.get("schedule_input_file"),
+            "water_tank": copy.deepcopy(simulation_args.get("Water Tank")),
+        },
+        "result_path": str(task["result_path"].resolve()),
+        "status": "pending",
+        "started_at": None,
+        "completed_at": None,
+        "simulation_seconds": None,
+        "queue_wait_seconds": None,
+        "total_seconds": None,
+        "uef": None,
+        "draw_outputs_cached": False,
+        "draw_outputs_cached_at": None,
+        "error": None,
+    }
+
+
+def scenario_cache_payload(
+    scenario,
+    run_default_no_pcm,
+    no_pcm_type,
+    tests=None,
+    scenario_folder=None,
+    scenario_results_path=None,
+    tasks=None,
+):
+    """Build scenario identity plus durable paths and per-task run metadata."""
+    payload = {
         "cache_version": SCENARIO_CACHE_VERSION,
         "scenario": copy.deepcopy(scenario),
         "run_default_no_pcm": bool(run_default_no_pcm),
         "default_no_pcm_type": str(no_pcm_type).lower(),
         "tests": copy.deepcopy(tests or scenario.get("tests") or DEFAULT_TESTS),
     }
+    if scenario_folder is not None:
+        scenario_folder = Path(scenario_folder).resolve()
+        payload["paths"] = {
+            "scenario_folder": str(scenario_folder),
+            "scenario_cache": str((scenario_folder / SCENARIO_CACHE_FILE).resolve()),
+            "scenario_results_csv": str(
+                Path(scenario_results_path or scenario_folder / DEFAULT_SCENARIO_RESULTS_FILE).resolve()
+            ),
+        }
+    if tasks is not None:
+        payload["tasks"] = [_task_cache_record(task) for task in tasks]
+    payload["run"] = {
+        "status": "pending",
+        "started_at": None,
+        "completed_at": None,
+        "simulation_seconds": None,
+        "draw_output_seconds": None,
+        "plot_seconds": None,
+        "total_seconds": None,
+        "last_updated_at": None,
+    }
+    return payload
+
+
+def _read_scenario_cache(scenario_folder):
+    """Read a scenario cache, returning None for missing or invalid JSON."""
+    cache_path = Path(scenario_folder) / SCENARIO_CACHE_FILE
+    if not cache_path.is_file():
+        return None
+    try:
+        with cache_path.open("r", encoding="utf-8") as cache_file:
+            return json.load(cache_file)
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def _cache_identity_matches(scenario_folder, cache_payload):
@@ -590,26 +685,52 @@ def _cache_identity_matches(scenario_folder, cache_payload):
     Existing result folders from before the cache metadata was added are still
     eligible for reuse when their exact expected result files are present.
     """
-    cache_path = scenario_folder / SCENARIO_CACHE_FILE
-    if not cache_path.is_file():
+    cache_path = Path(scenario_folder) / SCENARIO_CACHE_FILE
+    stored_payload = _read_scenario_cache(scenario_folder)
+    if stored_payload is None and not cache_path.is_file():
         return True
-
-    try:
-        with cache_path.open("r", encoding="utf-8") as cache_file:
-            stored_payload = json.load(cache_file)
-    except (OSError, json.JSONDecodeError):
+    if stored_payload is None:
         return False
 
-    return stored_payload == cache_payload
+    stored_version = stored_payload.get("cache_version")
+    if stored_version == SCENARIO_CACHE_VERSION:
+        return _cache_identity(stored_payload) == _cache_identity(cache_payload)
+
+    # Version 2 stored the same scenario identity but had no durable task
+    # records. Permit one-way migration from that format when its configuration
+    # still matches; the next write upgrades the folder to version 3.
+    if stored_version == 2:
+        stored_identity = _cache_identity(stored_payload)
+        candidate_identity = _cache_identity(cache_payload)
+        stored_identity.pop("cache_version", None)
+        candidate_identity.pop("cache_version", None)
+        return stored_identity == candidate_identity
+    return False
 
 
 def _write_scenario_cache(scenario_folder, cache_payload):
     """Atomically record a completed scenario's decoded configuration."""
     cache_path = scenario_folder / SCENARIO_CACHE_FILE
     temporary_path = scenario_folder / f"{SCENARIO_CACHE_FILE}.{os.getpid()}.tmp"
+
+    def json_default(value):
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, (dt.datetime, dt.date, dt.time)):
+            return value.isoformat()
+        if isinstance(value, Path):
+            return str(value)
+        return str(value)
+
     try:
         with temporary_path.open("w", encoding="utf-8") as cache_file:
-            json.dump(cache_payload, cache_file, indent=2, sort_keys=True)
+            json.dump(
+                cache_payload,
+                cache_file,
+                indent=2,
+                sort_keys=True,
+                default=json_default,
+            )
             cache_file.write("\n")
         os.replace(temporary_path, cache_path)
     finally:
@@ -618,13 +739,11 @@ def _write_scenario_cache(scenario_folder, cache_payload):
 
 
 def _task_result_is_complete(task):
-    """Return whether a task has a non-empty result and OCHRE completion mark."""
+    """Return whether a task has a non-empty time-series result CSV."""
     result_path = task["result_path"]
-    complete_path = task["complete_path"]
     return (
         result_path.is_file()
         and result_path.stat().st_size > 0
-        and complete_path.is_file()
     )
 
 
@@ -636,12 +755,69 @@ def cached_scenario_tasks(tasks, scenario_folder, cache_payload):
     """
     if not _cache_identity_matches(scenario_folder, cache_payload):
         return []
-    return [task for task in tasks if _task_result_is_complete(task)]
+
+    stored_payload = _read_scenario_cache(scenario_folder)
+    stored_records = {
+        record.get("filename"): record
+        for record in (stored_payload or {}).get("tasks", [])
+        if isinstance(record, dict)
+    }
+    if stored_records:
+        return [
+            task
+            for task in tasks
+            if stored_records.get(task["filename"], {}).get("status")
+            in {"complete", "cached", "cached_legacy"}
+            and _task_result_is_complete(task)
+        ]
+
+    # Folders written by the older runner have no task records. Keep their
+    # existing result/marker pairs reusable during the one-way migration.
+    legacy_cached = []
+    for task in tasks:
+        legacy_marker = task["result_path"].with_name(f"{task['filename']}_complete")
+        if _task_result_is_complete(task) and legacy_marker.is_file():
+            legacy_cached.append(task)
+    return legacy_cached
 
 
 def scenario_results_are_complete(tasks):
-    """Return whether every expected task result is present and complete."""
+    """Return whether every expected task result CSV is present and non-empty."""
     return bool(tasks) and all(_task_result_is_complete(task) for task in tasks)
+
+
+LEGACY_SUBMODEL_RESULT_PREFIXES = (
+    "Water Tank_",
+    "Water Tank with PCM_",
+    "Water Tank with Internal Multi PCM_",
+    "Water Tank with External PCM_",
+)
+
+
+def cleanup_legacy_task_artifacts(tasks):
+    """Remove obsolete nested-model results and empty status markers.
+
+    Earlier runner versions saved every nested tank model and used empty
+    per-task status files. These exact paths are no longer part of the cache;
+    remove them after cache discovery so legacy results can still be reused.
+    """
+    removed = 0
+    for task in tasks:
+        result_path = task["result_path"]
+        for status in ("complete", "failed"):
+            marker = result_path.with_name(f"{task['filename']}_{status}")
+            if marker.is_file():
+                marker.unlink()
+                removed += 1
+        for prefix in LEGACY_SUBMODEL_RESULT_PREFIXES:
+            for suffix in (".csv", "_complete", "_failed"):
+                nested_result = result_path.with_name(
+                    f"{prefix}{task['filename']}{suffix}"
+                )
+                if nested_result.is_file():
+                    nested_result.unlink()
+                    removed += 1
+    return removed
 
 
 def import_water_heating_schedule(schedule_file, duration):
@@ -1223,7 +1399,16 @@ def run_water_heater_electric(default_args, setpoint_temp, tank_volume):
     wh = ElectricResistanceWaterHeater(schedule=schedule, **equipment_args,)
 
     if test_type == "FHR":
-        hot_water_output_gallons, wh = simulate_first_hour_test(wh, enable_first_hour_test=True, disable_heating_during_draw=False, first_hour_duration=60, draw_rate_gpm=3, allow_setpoint_start=False, hot_water_temp_f=110, setpoint_temp_f=140)
+        hot_water_output_gallons, wh = simulate_first_hour_test(
+            wh,
+            enable_first_hour_test=True,
+            disable_heating_during_draw=False,
+            first_hour_duration=60,
+            draw_rate_gpm=3,
+            allow_setpoint_start=False,
+            hot_water_temp_f=110,
+            setpoint_temp_f=convert(setpoint_temp, "degC", "degF"),
+        )
         df = wh.finalize()
     else:
         df = wh.simulate()
@@ -1263,7 +1448,16 @@ def run_water_heater_heatpump(default_args, setpoint_temp, tank_volume):
     hpwh = HeatPumpWaterHeater(schedule=schedule, **equipment_args)
 
     if test_type == "FHR":
-        hot_water_output_gallons, hpwh = simulate_first_hour_test(hpwh, enable_first_hour_test=True, disable_heating_during_draw=False, first_hour_duration=60, draw_rate_gpm=3, allow_setpoint_start=False, hot_water_temp_f=110, setpoint_temp_f=140)
+        hot_water_output_gallons, hpwh = simulate_first_hour_test(
+            hpwh,
+            enable_first_hour_test=True,
+            disable_heating_during_draw=False,
+            first_hour_duration=60,
+            draw_rate_gpm=3,
+            allow_setpoint_start=False,
+            hot_water_temp_f=110,
+            setpoint_temp_f=convert(setpoint_temp, "degC", "degF"),
+        )
         df = hpwh.finalize()
     else:
         df = hpwh.simulate()
@@ -1326,6 +1520,7 @@ def run_water_heater_process(
     - Total time (waiting + processing)
     """
     actual_start_time = time.perf_counter()
+    started_at = _utc_timestamp()
     title = default_args.get('name', 'Name_Not_Specified')
     is_heatpump = default_args.get('is_heatpump', False)
     wait_time = actual_start_time - submission_time
@@ -1347,6 +1542,7 @@ def run_water_heater_process(
             f"{RED}{title}Error in simulation process run_water_heater_process: {str(e)}{RESET}"
         )
     end_time = time.perf_counter()
+    completed_at = _utc_timestamp()
     sim_duration = end_time - actual_start_time  # time spent in simulation function
     total_duration = end_time - submission_time  # includes waiting time
 
@@ -1358,7 +1554,15 @@ def run_water_heater_process(
     if simulation_error is not None:
         raise simulation_error
 
-    return title, result, sim_duration, wait_time, total_duration
+    return (
+        title,
+        result,
+        sim_duration,
+        wait_time,
+        total_duration,
+        started_at,
+        completed_at,
+    )
 
 
 def effective_run_default_no_pcm(scenario, config):
@@ -1400,9 +1604,12 @@ def build_scenario_tasks(
     scenario_base_args = copy.deepcopy(default_args)
     scenario_base_args.update(scenario["default_parameters"])
     scenario_base_args["output_path"] = str(scenario_folder)
-    # Results are required by the comparison pipeline, regardless of the
-    # historical default in this script.
+    # None lets the main water heater save results because verbosity is 9, but
+    # prevents nested tank models from saving their own duplicate time series.
     scenario_base_args["save_results"] = None
+    # The JSON scenario cache is the authoritative completion record. OCHRE's
+    # per-simulation empty *_complete files are therefore unnecessary.
+    scenario_base_args["save_status"] = False
     scenario_base_args.pop("schedule_input_file", None)
 
     pcm_defaults = _merge_dicts(DEFAULT_PCM_PROPERTIES, scenario["pcm_defaults"])
@@ -1421,8 +1628,6 @@ def build_scenario_tasks(
                 "group": group,
                 "test_type": test_type,
                 "result_path": scenario_folder / f"{filename}.csv",
-                "complete_path": scenario_folder / f"{filename}_complete",
-                "draw_output_path": scenario_folder / f"{filename}_draw_outputs.csv",
             }
         )
 
@@ -1518,11 +1723,23 @@ def build_scenario_tasks(
                                 )
                                 task_index += 1
 
+    expected_task_count = scenario_task_count(scenario, run_default_no_pcm, tests)
+    if len(tasks) != expected_task_count:
+        raise RuntimeError(
+            f"Scenario {scenario['name']!r} built {len(tasks)} task(s), "
+            f"but its configuration requires {expected_task_count}"
+        )
+    task_filenames = [task["filename"] for task in tasks]
+    if len(task_filenames) != len(set(task_filenames)):
+        raise RuntimeError(
+            f"Scenario {scenario['name']!r} generated duplicate task filenames"
+        )
+
     return tasks, case_paths_by_group, baseline_paths_by_group
 
 
-def run_scenario_tasks(tasks, processes, progress=None):
-    """Run one scenario's tasks and return successful timing/result records."""
+def run_scenario_tasks(tasks, processes, progress=None, on_task_update=None):
+    """Run one scenario's tasks and report durable status after each result."""
     process_results = {}
     if not tasks:
         print(f"{GREEN}No simulations to run; all task results were cached{RESET}")
@@ -1554,16 +1771,50 @@ def run_scenario_tasks(tasks, processes, progress=None):
 
         for task, future in task_futures:
             try:
-                title, result, sim_duration, wait_time, total_duration = future.get()
+                (
+                    title,
+                    result,
+                    sim_duration,
+                    wait_time,
+                    total_duration,
+                    started_at,
+                    completed_at,
+                ) = future.get()
                 process_results[title] = {
+                    "status": "complete",
                     "uef": result,
                     "sim_time": sim_duration,
                     "wait_time": wait_time,
                     "total_task_time": total_duration,
                     "group": task["group"],
+                    "started_at": started_at,
+                    "completed_at": completed_at,
                 }
+                if on_task_update is not None:
+                    on_task_update(
+                        task,
+                        {
+                            "status": "complete",
+                            "started_at": started_at,
+                            "completed_at": completed_at,
+                            "simulation_seconds": sim_duration,
+                            "queue_wait_seconds": wait_time,
+                            "total_seconds": total_duration,
+                            "uef": result,
+                            "error": None,
+                        },
+                    )
                 print(f"{GREEN}Successfully completed: {title}{RESET}")
             except Exception as exc:
+                if on_task_update is not None:
+                    on_task_update(
+                        task,
+                        {
+                            "status": "failed",
+                            "completed_at": _utc_timestamp(),
+                            "error": str(exc),
+                        },
+                    )
                 print(
                     f"{RED}{task['filename']} error in simulation process: "
                     f"{exc}{RESET}"
@@ -1575,22 +1826,56 @@ def run_scenario_tasks(tasks, processes, progress=None):
     return process_results
 
 
-def _draw_output_cache_is_complete(task):
-    """Return whether a task has a usable intermediate draw-output CSV."""
-    draw_output_path = task["draw_output_path"]
-    return draw_output_path.is_file() and draw_output_path.stat().st_size > 0
-
-
 def cache_draw_outputs_for_tasks(
     tasks,
+    scenario_results_path,
     process_results=None,
     workers=None,
+    on_task_update=None,
+    reset_cache=False,
 ):
-    """Calculate and cache draw metrics for completed tasks missing a cache."""
+    """Calculate missing draw metrics directly into one scenario CSV."""
     process_results = process_results or {}
+    scenario_results_path = Path(scenario_results_path)
+    cached_keys = set()
+    scenario_results_valid = False
+    existing_results = None
+    expected_keys = {task["filename"] for task in tasks}
+    if (
+        not reset_cache
+        and scenario_results_path.is_file()
+        and scenario_results_path.stat().st_size > 0
+    ):
+        try:
+            existing_results = pd.read_csv(scenario_results_path)
+            if "file_key" not in existing_results.columns:
+                raise ValueError("Scenario results CSV has no file_key column")
+            existing_results["file_key"] = existing_results["file_key"].astype(str)
+            existing_results = existing_results[
+                existing_results["file_key"].isin(expected_keys)
+            ].drop_duplicates(subset=["file_key"], keep="last")
+            existing_results.to_csv(scenario_results_path, index=False)
+            cached_keys = set(existing_results["file_key"])
+            scenario_results_valid = True
+        except (OSError, ValueError, pd.errors.EmptyDataError):
+            # A malformed or partial scenario CSV is not a valid draw cache.
+            cached_keys = set()
+
+    if on_task_update is not None:
+        cached_at = _utc_timestamp()
+        for task in tasks:
+            if task["filename"] in cached_keys:
+                on_task_update(
+                    task,
+                    {
+                        "draw_outputs_cached": True,
+                        "draw_outputs_cached_at": cached_at,
+                    },
+                )
+
     tasks_to_calculate = []
     for task in tasks:
-        if not _task_result_is_complete(task) or _draw_output_cache_is_complete(task):
+        if not _task_result_is_complete(task) or task["filename"] in cached_keys:
             continue
         tasks_to_calculate.append(task)
 
@@ -1616,7 +1901,8 @@ def cache_draw_outputs_for_tasks(
             )
         )
 
-    cached_count = 0
+    draw_outputs_to_export = {}
+    uef_by_key = {}
     for task in tasks_to_calculate:
         file_key = task["filename"]
         metrics = draw_outputs.get(file_key)
@@ -1631,38 +1917,61 @@ def cache_draw_outputs_for_tasks(
                 pd.read_csv(task["result_path"], index_col="Time", parse_dates=True),
                 file_key,
             )
-        export_draw_outputs_csv(
-            {file_key: metrics},
-            {file_key: uef},
-            task["draw_output_path"],
-        )
-        cached_count += 1
+        draw_outputs_to_export[file_key] = metrics
+        uef_by_key[file_key] = uef
 
-    return cached_count
+    if not draw_outputs_to_export:
+        return 0
+
+    export_draw_outputs_csv(
+        draw_outputs_to_export,
+        uef_by_key,
+        scenario_results_path,
+        append=scenario_results_valid,
+    )
+    cached_at = _utc_timestamp()
+    for task in tasks_to_calculate:
+        if task["filename"] not in draw_outputs_to_export:
+            continue
+        if on_task_update is not None:
+            on_task_update(
+                task,
+                {
+                    "draw_outputs_cached": True,
+                    "draw_outputs_cached_at": cached_at,
+                },
+            )
+
+    return len(draw_outputs_to_export)
 
 
-def combine_cached_draw_outputs(tasks, csv_path):
-    """Append all intermediate draw-output CSVs into one final CSV."""
-    intermediate_paths = [
-        task["draw_output_path"]
-        for task in tasks
-        if _draw_output_cache_is_complete(task)
+def combine_cached_draw_outputs(scenario_results, csv_path):
+    """Combine per-scenario result CSVs into the optional global CSV."""
+    scenario_paths = []
+    for scenario_result in scenario_results:
+        if isinstance(scenario_result, (str, os.PathLike, Path)):
+            scenario_paths.append(Path(scenario_result))
+        elif isinstance(scenario_result, dict):
+            path = scenario_result.get("scenario_results_path")
+            if path is not None:
+                scenario_paths.append(Path(path))
+
+    scenario_paths = [
+        path for path in scenario_paths if path.is_file() and path.stat().st_size > 0
     ]
-    if not intermediate_paths:
-        print(f"{YELLOW}No cached draw-output CSVs available for final export{RESET}")
+    if not scenario_paths:
+        print(f"{YELLOW}No scenario result CSVs available for final export{RESET}")
         return None, 0
 
-    exported_count = 0
-    for intermediate_path in intermediate_paths:
-        intermediate_df = pd.read_csv(intermediate_path)
-        export_draw_outputs_csv(
-            intermediate_df,
-            csv_path=csv_path,
-            append=exported_count > 0,
-        )
-        exported_count += len(intermediate_df)
+    scenario_frames = [pd.read_csv(path) for path in scenario_paths]
+    combined = pd.concat(scenario_frames, ignore_index=True, sort=False)
+    if "file_key" in combined.columns:
+        combined = combined.drop_duplicates(subset=["file_key"], keep="last")
+    csv_path = Path(csv_path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    combined.to_csv(csv_path, index=False)
 
-    return csv_path, exported_count
+    return csv_path, len(combined)
 
 
 def append_results_csv(source_csv, destination_csv):
@@ -1792,6 +2101,62 @@ def generate_scenario_plots(
     return saved_plot_results
 
 
+def _prepare_scenario_cache(cache_payload, scenario_folder, cached_tasks):
+    """Start a new cache revision while retaining timings for cache hits."""
+    stored_payload = _read_scenario_cache(scenario_folder)
+    stored_records = {
+        record.get("filename"): record
+        for record in (stored_payload or {}).get("tasks", [])
+        if isinstance(record, dict)
+    }
+    cached_filenames = {task["filename"] for task in cached_tasks}
+    for record in cache_payload.get("tasks", []):
+        filename = record["filename"]
+        if filename in cached_filenames and filename in stored_records:
+            old_record = stored_records[filename]
+            for field in (
+                "status",
+                "started_at",
+                "completed_at",
+                "simulation_seconds",
+                "queue_wait_seconds",
+                "total_seconds",
+                "uef",
+                "draw_outputs_cached",
+                "draw_outputs_cached_at",
+                "error",
+            ):
+                if field in old_record:
+                    record[field] = old_record[field]
+            record["status"] = "cached"
+            record["cache_source"] = "previous_run"
+        elif filename in cached_filenames:
+            record["status"] = "cached_legacy"
+            record["cache_source"] = "legacy_complete_marker"
+
+    cache_payload["run"] = {
+        "status": "running",
+        "started_at": _utc_timestamp(),
+        "completed_at": None,
+        "simulation_seconds": None,
+        "draw_output_seconds": None,
+        "plot_seconds": None,
+        "total_seconds": None,
+        "last_updated_at": _utc_timestamp(),
+    }
+    return cache_payload
+
+
+def _update_scenario_task_cache(cache_payload, scenario_folder, task, update):
+    """Update one task record and atomically persist the scenario cache."""
+    for record in cache_payload.get("tasks", []):
+        if record.get("filename") == task["filename"]:
+            record.update(update)
+            break
+    cache_payload["run"]["last_updated_at"] = _utc_timestamp()
+    _write_scenario_cache(scenario_folder, cache_payload)
+
+
 def run_scenario(
     scenario,
     config,
@@ -1830,17 +2195,40 @@ def run_scenario(
         tests=tests,
     )
 
+    configured_scenario_results_file = config.get(
+        "scenario_results_file", DEFAULT_SCENARIO_RESULTS_FILE
+    )
+    scenario_results_name = Path(configured_scenario_results_file).name
+    scenario_results_path = scenario_folder / (
+        scenario_results_name or DEFAULT_SCENARIO_RESULTS_FILE
+    )
     cache_payload = scenario_cache_payload(
         scenario,
         run_default_no_pcm=run_default_no_pcm,
         no_pcm_type=no_pcm_type,
         tests=tests,
+        scenario_folder=scenario_folder,
+        scenario_results_path=scenario_results_path,
+        tasks=tasks,
     )
+    cache_identity_matches = _cache_identity_matches(scenario_folder, cache_payload)
     cached_tasks = cached_scenario_tasks(
         tasks,
         scenario_folder,
         cache_payload,
     )
+    removed_legacy_artifacts = cleanup_legacy_task_artifacts(tasks)
+    if removed_legacy_artifacts:
+        print(
+            f"{YELLOW}Removed {removed_legacy_artifacts} obsolete nested-model/status "
+            f"artifact(s) from {scenario_folder}{RESET}"
+        )
+    cache_payload = _prepare_scenario_cache(
+        cache_payload,
+        scenario_folder,
+        cached_tasks,
+    )
+    _write_scenario_cache(scenario_folder, cache_payload)
     if progress is not None:
         progress.start_case(scenario["name"], len(tasks))
         progress.advance(len(cached_tasks), force=True)
@@ -1858,20 +2246,41 @@ def run_scenario(
         tasks_to_run,
         processes,
         progress=progress,
+        on_task_update=lambda task, update: _update_scenario_task_cache(
+            cache_payload,
+            scenario_folder,
+            task,
+            update,
+        ),
     )
     simulation_seconds = time.perf_counter() - simulation_start
     if progress is not None:
         progress.render(force=True)
 
+    draw_output_start = time.perf_counter()
     if export_draw_outputs:
         cache_draw_outputs_for_tasks(
             tasks,
+            scenario_results_path,
             process_results=process_results,
             workers=processes,
+            on_task_update=lambda task, update: _update_scenario_task_cache(
+                cache_payload,
+                scenario_folder,
+                task,
+                update,
+            ),
+            reset_cache=not cache_identity_matches,
         )
+    draw_output_seconds = time.perf_counter() - draw_output_start
 
-    if scenario_results_are_complete(tasks):
-        _write_scenario_cache(scenario_folder, cache_payload)
+    results_complete = scenario_results_are_complete(tasks)
+    cache_payload["run"]["status"] = "complete" if results_complete else "partial"
+    cache_payload["run"]["completed_at"] = _utc_timestamp()
+    cache_payload["run"]["simulation_seconds"] = simulation_seconds
+    cache_payload["run"]["draw_output_seconds"] = draw_output_seconds
+    _write_scenario_cache(scenario_folder, cache_payload)
+    if results_complete:
         print(f"{GREEN}Scenario cache is complete: {SCENARIO_CACHE_FILE}{RESET}")
 
     plot_start = time.perf_counter()
@@ -1891,6 +2300,10 @@ def run_scenario(
         )
     plot_seconds = time.perf_counter() - plot_start
     scenario_seconds = time.perf_counter() - scenario_start
+    cache_payload["run"]["plot_seconds"] = plot_seconds
+    cache_payload["run"]["total_seconds"] = scenario_seconds
+    cache_payload["run"]["last_updated_at"] = _utc_timestamp()
+    _write_scenario_cache(scenario_folder, cache_payload)
 
     print(
         f"{BOLD}{GREEN}Scenario {scenario['name']} complete: "
@@ -1905,6 +2318,10 @@ def run_scenario(
     return {
         "scenario": scenario["name"],
         "folder": str(scenario_folder),
+        "scenario_cache_path": str(
+            (scenario_folder / SCENARIO_CACHE_FILE).resolve()
+        ),
+        "scenario_results_path": str(scenario_results_path.resolve()),
         "tasks": tasks,
         "process_results": process_results,
         "cached_tasks": len(cached_tasks),
@@ -1979,7 +2396,10 @@ def parse_runner_args(argv=None):
     parser.add_argument(
         "--export-draw-outputs",
         action="store_true",
-        help="Calculate hot-water draw metrics and export all completed results to one CSV",
+        help=(
+            "Calculate hot-water draw metrics into one scenario_results.csv per "
+            "scenario and optionally combine them into the configured global CSV"
+        ),
     )
     parser.add_argument(
         "--draw-outputs-csv",
@@ -2083,9 +2503,8 @@ def main(argv=None):
             config["draw_outputs_csv"],
             config["config_base"],
         )
-        all_tasks = [task for result in run_results for task in result["tasks"]]
         exported_path, exported_count = combine_cached_draw_outputs(
-            all_tasks,
+            run_results,
             draw_outputs_csv,
         )
         if exported_path is not None:
